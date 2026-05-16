@@ -582,6 +582,91 @@ class GeminiClient:
 
         return frames
 
+    async def screen_media_content(self, media_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Pre-screen media to determine if it is a valid app/product screenshot or video.
+        Returns {"is_valid": bool, "reason": str}.
+        Rejects selfies, people photos, non-product images, memes, etc.
+        """
+        SCREENING_PROMPT = (
+            "You are a content screening gate for a QA Bug Reporting bot at IndiaMART.\n"
+            "Your ONLY job is to determine if the attached image(s) are VALID for a bug report.\n\n"
+            "VALID content (return is_valid=true):\n"
+            "- Mobile app screenshots (any app screen, popup, dialog, error)\n"
+            "- Web application screenshots (browser pages, dashboards, forms)\n"
+            "- Screen recordings / video frames showing app UI\n"
+            "- Console logs, error messages, terminal output\n"
+            "- Developer tools / network tabs / API responses\n\n"
+            "INVALID content (return is_valid=false):\n"
+            "- Photos of people, selfies, group photos\n"
+            "- Photos of animals, nature, landscapes\n"
+            "- Memes, jokes, stickers, GIFs\n"
+            "- Food photos, random objects\n"
+            "- Documents/PDFs that are NOT related to software testing\n"
+            "- Blank or completely black/white images\n\n"
+            "Respond with ONLY valid JSON:\n"
+            '{"is_valid": true/false, "reason": "brief explanation"}'
+        )
+
+        content_parts = [{"type": "text", "text": "Screen this media. Is it a valid app/product screenshot for a QA bug report?"}]
+
+        # Add first image or first frame of video for screening
+        for item in media_items[:1]:  # Only screen the first item for speed
+            mime_type = item["mime_type"]
+            data = item["data"]
+
+            if mime_type.startswith("image/"):
+                b64_data = base64.b64encode(data).decode("utf-8")
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{b64_data}"},
+                })
+            elif mime_type.startswith("video/"):
+                frames = self._extract_video_frames(data, mime_type)
+                if frames:
+                    # Just screen the first frame
+                    b64_frame = base64.b64encode(frames[0]["data"]).decode("utf-8")
+                    content_parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{frames[0]['mime_type']};base64,{b64_frame}"},
+                    })
+                else:
+                    return {"is_valid": True, "reason": "Could not extract video frames for screening, allowing through."}
+            else:
+                # Audio or unsupported — allow through
+                return {"is_valid": True, "reason": "Non-visual media, skipping screen."}
+
+        messages = [
+            {"role": "system", "content": SCREENING_PROMPT},
+            {"role": "user", "content": content_parts},
+        ]
+
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            response = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: self.client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        response_format={"type": "json_object"},
+                        temperature=0.1,
+                        max_tokens=200,
+                        timeout=15.0,
+                    ),
+                ),
+                timeout=20.0,
+            )
+            response_text = response.choices[0].message.content
+            logger.info(f"Content screening result: {response_text}")
+            cleaned = self._clean_json_response(response_text)
+            result = json.loads(cleaned)
+            return {"is_valid": result.get("is_valid", True), "reason": result.get("reason", "")}
+        except Exception as e:
+            logger.error(f"Content screening failed: {e}. Allowing through.")
+            return {"is_valid": True, "reason": f"Screening failed ({e}), allowing through."}
+
     async def check_health(self) -> bool:
         """Check if LLM API is accessible."""
         try:

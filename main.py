@@ -9,6 +9,7 @@ Deployed at: https://qa-bug-bot-542857204182.us-central1.run.app
 
 import asyncio
 import logging
+import re
 import time
 from collections import OrderedDict
 from datetime import datetime, timezone
@@ -530,6 +531,24 @@ async def _handle_bug_report(
     attachments = message.get("attachment", [])
     
     # ── Validate Bug Report Checkpoints ──
+    
+    # Check 1: Reject link-only messages (URLs with no real description)
+    url_pattern = re.compile(r'https?://\S+')
+    text_without_urls = url_pattern.sub('', text).strip()
+    if text_without_urls and len(text_without_urls) < 15 and not attachments:
+        return {
+            "text": (
+                "⚠️ **Just a link is not enough to raise a bug.**\n\n"
+                "Please provide a detailed description along with the link, such as:\n"
+                "- What were you doing?\n"
+                "- What went wrong?\n"
+                "- What was the expected behavior?\n\n"
+                "_Example: 'On clicking this link, user gets a 404 error instead of the product page. "
+                "Device: Samsung S23, OS: Android 15'_"
+            )
+        }
+    
+    # Check 2: Short text with no media
     if len(text.strip()) < 20 and not attachments:
         return {
             "text": (
@@ -537,6 +556,18 @@ async def _handle_bug_report(
                 "To raise a ticket, you must provide:\n"
                 "1. A detailed description (at least 20 characters) with steps, **OR**\n"
                 "2. A video or screenshot attachment."
+            )
+        }
+    
+    # Check 3: Media-only with no meaningful text — ask for context
+    if attachments and len(text.strip()) < 10:
+        return {
+            "text": (
+                "⚠️ **Please provide a brief description along with your media.**\n\n"
+                "I can see you've attached media, but I need some context to raise an accurate bug ticket.\n\n"
+                "Please resend with a short description, for example:\n"
+                "_'Login screen crashes after entering OTP. Device: Samsung S23, OS: Android 15'_\n\n"
+                "This helps me correctly identify the **project**, **priority**, and **bug type**."
             )
         }
 
@@ -650,6 +681,38 @@ async def _process_media_and_create_ticket(
                     logger.error(f"Attachment download error: {dl_err}")
         else:
             logger.warning("Chat API not available for attachment download")
+
+        # ── AI Content Screening Gate ──
+        if media_items and gemini_client:
+            try:
+                screening = await asyncio.wait_for(
+                    gemini_client.screen_media_content(media_items),
+                    timeout=25.0,
+                )
+                if not screening.get("is_valid", True):
+                    reason = screening.get("reason", "The image does not appear to be an app screenshot.")
+                    logger.info(f"Content screening REJECTED: {reason}")
+                    reject_msg = (
+                        f"❌ **Media Rejected: Not a valid bug screenshot/recording**\n\n"
+                        f"**Reason:** {reason}\n\n"
+                        f"Please send only:\n"
+                        f"• App screenshots showing the bug\n"
+                        f"• Screen recordings of the bug reproduction\n"
+                        f"• Console logs or error messages\n\n"
+                        f"_Photos of people, selfies, or non-product images cannot be used for bug reports._"
+                    )
+                    if chat_client and chat_client.is_available():
+                        await asyncio.wait_for(
+                            chat_client.send_message(
+                                space_name=space_name, text=reject_msg, thread_name=thread_name,
+                            ),
+                            timeout=10.0,
+                        )
+                    return  # Stop processing — do NOT create a ticket
+                else:
+                    logger.info(f"Content screening PASSED: {screening.get('reason', 'OK')}")
+            except Exception as screen_err:
+                logger.error(f"Content screening error: {screen_err}. Allowing through.")
 
         # ── Phase 2: Enrich with media ──
         bug_report = initial_report  # fallback
