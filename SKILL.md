@@ -1,3 +1,12 @@
+---
+name: qa-bug-logger
+description: Automatically converts Google Chat bug reports (text, images, videos) into structured OpenProject tickets. Use when a QA tester reports a bug in Chat.
+license: Proprietary
+metadata:
+  author: IndiaMART-QA-Team
+  version: "1.2.0"
+---
+
 # SKILL.md — Brain Box Solution: AI-Powered QA Bug Logger
 
 ## 🎯 Skill Summary
@@ -167,9 +176,14 @@ Based on audit of **500 randomly sampled live production tickets**:
 ├── database.py                # SQLite user registration persistence
 ├── Dockerfile                 # Production container (Python 3.11 + OpenCV)
 ├── requirements.txt           # Pinned dependencies
-├── AUDIT_CHECKLIST.md         # Quality assurance scoring framework
-├── PIPELINE_EXPLANATION.md    # Stakeholder-facing architecture guide
-└── LLM_HANDOVER.md            # Developer context for future maintenance
+├── scripts/                   # Helper scripts
+│   ├── extract_training.py
+│   └── generate_audit_sheet.py
+├── references/                # Detailed technical documentation
+│   ├── AUDIT_CHECKLIST.md
+│   ├── PIPELINE_EXPLANATION.md
+│   └── LLM_HANDOVER.md
+└── assets/                    # Training data and templates
 ```
 
 ---
