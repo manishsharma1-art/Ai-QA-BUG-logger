@@ -36,3 +36,6 @@ gcloud_sdk/
 *.xlsx
 *.txt
 *_raw.json
+
+# Local documentation
+HACKATHON_*.md
