@@ -292,12 +292,13 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             "space": {"name": space_name},
         }
 
-        if text.lower().startswith("/help"):
+        clean_text = text.lower().strip()
+        if clean_text in ["hi", "hello", "hey", "help", "bot", "/help"]:
             return _addon_response(_get_help_response())
-        if text.lower().startswith("/register"):
+        if clean_text.startswith("/register"):
             res = await _handle_register(text, sender_name, display_name)
             return _addon_response(res)
-        if text.lower().startswith("/status"):
+        if clean_text.startswith("/status"):
             res = await _handle_status(sender_name, display_name)
             return _addon_response(res)
         res = await _handle_bug_report(synthetic_event, text, sender_name, display_name, background_tasks)
@@ -345,16 +346,18 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         logger.info(f"Duplicate message ignored: {message_name}")
         return {}
 
-    # ── Command: /help ──
-    if text.lower().startswith("/help"):
+    clean_text = text.lower().strip()
+    
+    # ── Command: /help or Greetings ──
+    if clean_text in ["hi", "hello", "hey", "help", "bot", "/help"]:
         return _get_help_response()
 
     # ── Command: /register ──
-    if text.lower().startswith("/register"):
+    if clean_text.startswith("/register"):
         return await _handle_register(text, sender_name, display_name)
 
     # ── Command: /status ──
-    if text.lower().startswith("/status"):
+    if clean_text.startswith("/status"):
         return await _handle_status(sender_name, display_name)
 
     # ── Bug Report ──
@@ -496,9 +499,16 @@ async def _handle_bug_report(
     - Text-only: Do EVERYTHING inline (Phase 1 + ticket creation) and return result directly.
     - With media: Do Phase 1 inline, fire asyncio.Task for Phase 2 + ticket, return ack now.
     """
-    # Check if user is registered
+    # Check if user is registered, otherwise fallback to space default
     user = await get_user_by_chat_id(sender_name)
-    if not user:
+    user_api_key = None
+    
+    if user:
+        user_api_key = user.openproject_api_key
+    elif settings.default_openproject_api_key and settings.demo_space_id and settings.demo_space_id in space_name:
+        user_api_key = settings.default_openproject_api_key
+        logger.info(f"User {display_name} not registered. Falling back to DEFAULT_OPENPROJECT_API_KEY in Demo Space.")
+    else:
         return {
             "text": (
                 "⚠️ **You are not registered.**\n\n"
@@ -518,6 +528,18 @@ async def _handle_bug_report(
     space_name = event.get("space", {}).get("name", "")
     thread_name = message.get("thread", {}).get("name", "")
     attachments = message.get("attachment", [])
+    
+    # ── Validate Bug Report Checkpoints ──
+    if len(text.strip()) < 20 and not attachments:
+        return {
+            "text": (
+                "⚠️ **Invalid Bug Report**\n\n"
+                "To raise a ticket, you must provide:\n"
+                "1. A detailed description (at least 20 characters) with steps, **OR**\n"
+                "2. A video or screenshot attachment."
+            )
+        }
+
     start_time = time.time()
 
     # ── Phase 1: Text analysis (always runs inline, ~5-10s) ──
@@ -539,7 +561,7 @@ async def _handle_bug_report(
     if not attachments:
         try:
             logger.info("No media — creating ticket synchronously...")
-            ticket = await op_client.create_work_package(initial_report, user.openproject_api_key)
+            ticket = await op_client.create_work_package(initial_report, user_api_key)
             elapsed = round(time.time() - start_time, 1)
             logger.info(f"✅ Ticket #{ticket['ticket_id']} created in {elapsed}s (text-only)")
             return {
@@ -568,7 +590,7 @@ async def _handle_bug_report(
             text=text,
             initial_report=initial_report,
             attachments=attachments,
-            user_api_key=user.openproject_api_key,
+            user_api_key=user_api_key,
             space_name=space_name,
             thread_name=thread_name,
             display_name=display_name,

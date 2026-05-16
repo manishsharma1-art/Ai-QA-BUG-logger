@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     openproject_base_url: str = Field(
         default="https://project.intermesh.net", env="OPENPROJECT_BASE_URL"
     )
+    default_openproject_api_key: str = Field(
+        default="", env="DEFAULT_OPENPROJECT_API_KEY"
+    )
+    demo_space_id: str = Field(
+        default="", env="DEMO_SPACE_ID"
+    )
 
     # ── Google Chat Configuration ──
     google_service_account_json: str = Field(
