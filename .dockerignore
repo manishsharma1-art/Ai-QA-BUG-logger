@@ -1,0 +1,23 @@
+# Ignore analysis/training data files (not needed in production)
+training_data_raw.json
+training_examples.json
+training_examples_fewshot.json
+analyze_bugs.py
+extract_training.py
+bug_analysis_output.txt
+bug_analysis_full.txt
+
+# Ignore dev/docs files
+README.md
+USER_GUIDE.md
+DEPLOYMENT.md
+.env.example
+.gitignore
+.git/
+__pycache__/
+*.pyc
+*.pyo
+*.md
+.env
+venv/
+.venv/

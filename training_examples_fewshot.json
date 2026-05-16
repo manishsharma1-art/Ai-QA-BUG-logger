@@ -1,0 +1,132 @@
+[
+  {
+    "id": 636302,
+    "subject": "{Service Dependent}When the user clicks on the catalog link icon or selects the catalog link template from LMS conversation screen, the catalog link is not sent.",
+    "description_raw": "### **Actual Behavior**\n\nWhen the user clicks on the catalog link icon or selects the catalog link template from LMS conversation screen, the catalog link is not sent.\n\nOnly catalog link with no actual link is being sent to the buyer\n\nReplicating on both LMS desktop and App\n\nDue to above issue user is unable to send catalog link message on whatsapp\n\n### **Expected Behavior**\n\nOn clicking catalog link template or cta actual seller catalog link along with message should be sent\n\n### **Steps to reproduce:**\n\n1.  Login as 6601433\n2.  Open conversation screen of any user\n3.  click on catalog link template or icon shown on mini catalog\n4.  check the catalog link text is being shared with no actual link\n\n### **Test Environment**:\n\n1.  **Device:** Realme 10 pro plus\n2.  **Environment**: Stage\n3.  **Operating System: Android 15**",
+    "project": "Android",
+    "priority": "Medium",
+    "bug_type": "Functional/Logical",
+    "environment": "STAGE",
+    "category": "LMS_Webview"
+  },
+  {
+    "id": 636356,
+    "subject": "Blocker pop-up is not coming on the tender listing when an tender is consumed through gmail deeplinking.",
+    "description_raw": "### **Actual Behavior**\n\nBlocker pop-up is not coming on the tender listing when an tender is consumed through gmail deeplinking.\n\n### **Expected Behavior**\n\nBlocker pop-up should come on the tender listing when an tender is consumed through gmail deeplinking.\n\n### **Steps to reproduce:**\n\n1.  Login as 1204501254 whose gst is not verified and pan is not provided\n2.  Navigate to tender mailer.\n3.  consume any tender.\n4.  Observe that the blocker pop-up is not coming.\n\n### **Test Environment**:\n\n1.  **Device:** IQOO Z9 5g Mobile\n2.  **Environment**: Stage\n3.  **Operating System:** Android 15",
+    "project": "Android",
+    "priority": "Medium",
+    "bug_type": "Functional/Logical",
+    "environment": "STAGE",
+    "category": "BL_Webview"
+  },
+  {
+    "id": 636404,
+    "subject": "User able to consume the BL from google deeplinking/mailer  even when the primary email is unverified.",
+    "description_raw": "### **Actual Behavior**\n\nUser able to consume the BL from google deeplinking even when the primary email is unverified.\n\n### **Expected Behavior**\n\nUser shouldn&#39;t be able to consume the BL from google deeplinking  when the primary email is unverified.\n\n### **Steps to reproduce:**\n\n1.  Login as 1002520031\n2.  Go to google and search for bags buyleads indiamart/Instant alert mailer.\n3.  Click on any Buyleads link\n4.  Click on contact now cta.\n5.  Observe the BL is being consumed.\n\n### **Test Environment**:\n\n1.  **Device:** IQOO Z9 5g Mobile\n2.  **Environment**: Stage\n3.  **Operating System:** Android 15",
+    "project": "Android",
+    "priority": "Medium",
+    "bug_type": "Functional/Logical",
+    "environment": "STAGE",
+    "category": "BL_Webview"
+  },
+  {
+    "id": 636650,
+    "subject": "The Renewal banners are not clickable on BL Balance pop-up in BL Webview page.",
+    "description_raw": "### **Actual Behavior**\n\nOn the BL Webview page, when the BL Balance popup is displayed, the Renewal banners shown within the popup are not clickable.  \nTapping or clicking on these banners does not trigger any action\n\n### **Expected Behavior**\n\nRenewal banners in the BL Balance popup should be fully clickable  \nClicking a banner should navigate the user to the relevant Renewal page\n\n### **Steps to reproduce:**\n\n1.  Log in from the seller\n2.  Open the BL Webview page.\n3.  Click on the contextual menu or 3 dot menu in right top of the page.\n4.  Now check for the BL balance option in the menus\n5.  BL balance is seen in the pop up\n6.  Observe the Renewal banners displayed in the popup.\n7.  Try tapping/clicking on any Renewal banner.\n\n### **Test Environment**:\n\n1.  **Device:** Iphone 13\n2.  **Environment**: Stage\n3.  **Operating System: IOS 18.7**",
+    "project": "IM-iOS Native",
+    "priority": "Medium",
+    "bug_type": "Functional/Logical",
+    "environment": "STAGE",
+    "category": ""
+  },
+  {
+    "id": 636682,
+    "subject": "The back CTA missing on order cancelled and order Expired Pages When Opened from Order Details Page",
+    "description_raw": "### **Actual Behavior**\n\nWhen navigating to the Order Cancelled or Order Expired page from the Order Details page, there is no Back CTA (button/icon) available\n\n### **Expected Behavior**\n\nThe Order Cancelled and Order Expired pages should include a Back CTA (e.g., back arrow or button) that allows users to return to the Order Details page or the previous screen.\n\n### **Steps to reproduce:**\n\n1.  Log in from the seller\n2.  Now open the order details listing page in Lead Manager\n3.  Now check the cancelled order and the expired  order\n4.  Now, click on the order card to open the order details page\n5.  Now page is opened and there is no any option to back or move to next page\n\n### **Test Environment**:\n\n1.  **Device:** Iphone 13\n2.  **Environment**: Stage\n3.  **Operating System: IOS 18.7**",
+    "project": "IM-iOS Native",
+    "priority": "Medium",
+    "bug_type": "Functional/Logical",
+    "environment": "STAGE",
+    "category": ""
+  },
+  {
+    "id": 637039,
+    "subject": "The MDC/Trustseal renewal payment option is not enabled on the IM services page after clicking ‘Renew Now’ CTA.",
+    "description_raw": "### **Actual Behavior**\n\nThe MDC/Trustseal renewal payment option is not enabled on the IM services page after clicking ‘Renew Now’ CTA.  \nWhen the user clicks on the “Renew Now” CTA from the MDC / Trustseal section, the user is redirected to the IM Services page. However, the MDC Renewal payment option is not enabled/active on the IM Services page.\n\n### **Expected Behavior**\n\nAfter clicking the “Renew Now” CTA from MDC / Trustseal, the MDC Renewal payment option should be enabled and selectable on the IM Services page, allowing the user to directly proceed with the renewal payment.\n\n### **Steps to reproduce:**\n\n1.  Log in as a seller with MDC / Trustseal renewal due.\n2.  Click on the “Renew Now” CTA from the MDC / Trustseal banner or section.\n3.  User is redirected to the IM Services page.\n4.  Observe the MDC Renewal payment option\n5.  It is not being active so that we can proceed for the payment\n6.  User has to open the option for the respective services and make the payment\n\n### **Test Environment**:\n\n1.  **Device:** Iphone 13\n2.  **Environment**: Stage\n3.  **Operating System:** IOS 18.7",
+    "project": "IM-iOS Native",
+    "priority": "Medium",
+    "bug_type": "UI/UX",
+    "environment": "STAGE",
+    "category": ""
+  },
+  {
+    "id": 637424,
+    "subject": "Incorrect placeholder message is displayed in the message text box for users where the outbound template condition is satisfied and there has been no exchange of messages within the last 24 hours.",
+    "description_raw": "### **Actual Behavior**\n\nIncorrect placeholder message is displayed in the message text box for users where the outbound template condition is satisfied and there has been no exchange of messages within the last 24 hours.\n\n&quot; Send a whatsapp template to start a conversation&quot; - When outbound template is not sent.\n\n&quot; Chat opens after buyer replies&quot; - When outbound template is sent.\n\nAbove placeholder messages should be shown.\n\n<img class=\"op-uc-image op-uc-image_inline\" src=\"/api/v3/attachments/722769/content\">\n\n### **Expected Behavior**\n\nPlaceholder message for locked chatbox in LMS conversation screen should be similar to desktop LMS.\n\n<img class=\"op-uc-image op-uc-image_inline\" src=\"/api/v3/attachments/722770/content\">\n\n### **Steps to reproduce:**\n\n1.  Login as IM Insta seller\n2.  Open conversation of any buyer where outbound template condition is satisfied\n3.  Check the placeholder message shown on chatbox.\n\n### **Test Environment**:\n\n1.  **Device:** Realme 10 pro plus\n2.  **Environment**: Stage\n3.  **Operating System: Android 15**",
+    "project": "Android",
+    "priority": "Medium",
+    "bug_type": "Content",
+    "environment": "STAGE",
+    "category": "LMS_Webview"
+  },
+  {
+    "id": 637431,
+    "subject": "Lock icon overlaps Mini Catalog icon in LMS conversation text box",
+    "description_raw": "### **Actual Behavior**\n\nThe lock icon is displayed above the Mini Catalog icon in the message text box on the LMS conversation screen, causing the two icons to overlap.\n\n<img class=\"op-uc-image op-uc-image_inline\" src=\"/api/v3/attachments/722781/content\">\n\n### **Expected Behavior**\n\nUI of lock icon should not overlap with mini catalog icon in lms conversation screen.\n\n### **Steps to reproduce:**\n\n1.  Login as IM Insta seller\n2.  Open LMS listing screen\n3.  open any conversation of buyer where outbound template condition is satisfied.\n4.  check the UI of message text box\n\n### **Test Environment**:\n\n1.  **Device:** Realme 10 pro plus\n2.  **Environment**: Stage\n3.  **Operating System: Android 15**",
+    "project": "Android",
+    "priority": "Medium",
+    "bug_type": "UI/UX",
+    "environment": "STAGE",
+    "category": "LMS_Webview"
+  },
+  {
+    "id": 639021,
+    "subject": "On the GST pop-up PAN option is not being shown on the live app.",
+    "description_raw": "### **Actual Behavior**\n\n**On the GST pop-up PAN option is not being shown on the live app.**\n\n### **Expected Behavior**\n\n**On the GST pop-up PAN option should be shown on the live app.**\n\n### **Steps to reproduce:**\n\n1.  Login as 9292006108/1204501254\n2.  Navigate to BL \n3.  Click on contact buyer now cta\n4.  Observe that the GST pop-up is not having the option of PAN.\n\n### **Test Environment**:\n\n1.  **Device:** IQOO Z9 5g Mobile\n2.  **Environment**: Stage\n3.  **Operating System:** Android 15",
+    "project": "Android",
+    "priority": "High",
+    "bug_type": "Functional/Logical",
+    "environment": "STAGE",
+    "category": "BL_Webview"
+  },
+  {
+    "id": 640676,
+    "subject": "404 error is shown when we click on update product cta  in edit product page ",
+    "description_raw": "### **Actual Behavior**\n\n404 error is shown when we click on update product cta in edit product page \n\n### **Expected Behavior**\n\n404 error should not be shown and user should navigate to product listing when we click on update product cta \n\n### **Steps to reproduce:**\n\n1.  login with 9390158763 and navigate to product listing page\n2.  click on context menu of product card and click on add description\n3.  add some description in edit product page and click on update product cta\n4.  observe 404 error is shown when we click on update product cta after entering description in edit product page\n5.  observe the same behavior when we add description from touchpoints like edit product product page and produt score popup\n\n### **Test Environment**:\n\n1.  **Device:** iqoo z6\n2.  **Environment**: Stage\n3.  **Operating System:** android 14",
+    "project": "Android",
+    "priority": "High",
+    "bug_type": "UI/UX",
+    "environment": "STAGE",
+    "category": "Products_Webview"
+  },
+  {
+    "id": 643630,
+    "subject": "The photosearch is not working as showing continuous loader on the search results page.",
+    "description_raw": "### **Actual Behavior**\n\nThe photosearch is not working as showing continuous loader on the search results page.\n\n### **Expected Behavior**\n\nThe results should be searched instantly.\n\n### **Steps to reproduce:**\n\n1.  Log in from the Buyer\n2.  Now navigate to the search page\n3.  Click on the camera icon \n4.  Now the photosearch page is opened\n5.  Click upload any photo from the gallery\n6.  Photo search page is loading no results are showing\n\n### **Test Environment**:\n\n1.  **Device:** iPhone 13\n2.  **Environment**: Stage\n3.  **Operating System: iOS 26.2**",
+    "project": "IM-iOS Native",
+    "priority": "High",
+    "bug_type": "Functional/Logical",
+    "environment": "STAGE",
+    "category": ""
+  },
+  {
+    "id": 645285,
+    "subject": "Native Buyer Page issues-UI",
+    "description_raw": "### **Actual Behavior**\n\nThere are multiple, native buyer page issues which needs to be taken care of:\n\n1.  Low res call icon in company card in PDP\n2.  Incorrect comma spacing in location\n3.  Rating separators are not aligned in company page.\n4.  No consistency in the unit text in various product cards across app.\n\n### **Expected Behavior**\n\n1.  call icon should be of high resolution\n2.  the comma spacing should be like &quot;New Delhi, India&quot;\n3.  Proper rating separation should be there.\n4.  The text consistency for units should be same.\n\n### **Steps to reproduce:**\n\n1.  Login to the app in buyer side.\n2.  observe the issues\n\n### **Test Environment**:\n\n1.  **Device:** Mobile(iphone 16 pro)\n2.  **Environment**: Stage\n3.  **Operating System:** ios 26",
+    "project": "IM-iOS Native",
+    "priority": "Medium",
+    "bug_type": null,
+    "environment": "STAGE",
+    "category": "Buyer Dashboard"
+  },
+  {
+    "id": 648598,
+    "subject": " Soft pop up update is getting collapsed in previous build.",
+    "description_raw": "### **Actual Behavior**\n\nSoft pop-up update is getting collapsed in the previous build.\n\n### **Expected Behavior**\n\nSoft pop-up update should not collapse when the location pop-up appears.\n\n### **Steps to reproduce:**\n\n1.  Install the old build version, like 13.6.3\n2.  Log in with the buyer\n3.  On the dashboard, check the update pop-up\n\n### **Test Environment:**\n\n1.  **Device:** Samsung s23\n2.  **Environment**: Stage\n3.  **Operating System:** Android 16",
+    "project": "Android",
+    "priority": "Medium",
+    "bug_type": null,
+    "environment": "STAGE",
+    "category": "User Login"
+  }
+]
