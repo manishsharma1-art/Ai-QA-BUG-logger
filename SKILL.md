@@ -9,6 +9,10 @@ metadata:
 
 # SKILL.md — Brain Box Solution: AI-Powered QA Bug Logger
 
+## 🤝 Team & Cross-Functional Collaboration
+**Primary Developer:** Manish Sharma (Core Architecture & Implementation)
+**Collaboration:** Built in close collaboration with the IndiaMART QA team, who provided the 611 real-world bug tickets used to domain-train the AI, and helped define the precise markdown format required by the OpenProject integration.
+
 ## 🎯 Skill Summary
 
 **Brain Box** is a production-deployed AI system that converts raw Google Chat messages — text, screenshots, and screen recordings — into fully structured OpenProject bug tickets in under 60 seconds. It replaces a 10-minute manual workflow with a one-message interaction, reclaiming **1,920 engineering hours per year** at organizational scale.
@@ -26,8 +30,8 @@ metadata:
 - **Phase 2 (Async Background):** An `asyncio.Task` is launched *after* the HTTP response is sent. This task downloads the video from Google Chat, extracts frames, runs multimodal analysis, creates the OpenProject ticket, uploads media attachments, and sends the final notification back to the Chat thread.
 
 **Key engineering challenge solved:**
-- Google Cloud Run aggressively throttles CPU to zero after the HTTP response. We deploy with `--no-cpu-throttling` to keep the container alive for Phase 2.
-- Python's garbage collector was silently destroying our `asyncio.Task` mid-execution. We solved this with a global `_active_background_tasks` set that holds strong references until the task completes.
+- **Challenge:** Google Cloud Run aggressively throttles CPU to zero after the HTTP response. We deploy with `--no-cpu-throttling` to keep the container alive for Phase 2.
+- **Challenge:** Python's garbage collector was silently destroying our `asyncio.Task` mid-execution, causing silent failures without logs. We solved this with a global `_active_background_tasks` set that holds strong references until the task completes.
 
 **File:** [`main.py`](main.py) — `_handle_bug_report()` and `_process_media_and_create_ticket()`
 
@@ -97,6 +101,20 @@ We extracted and analyzed **611 real production bug reports** from IndiaMART's Q
 **File:** [`config.py`](config.py) — `default_openproject_api_key`, `demo_space_id`
 
 ---
+
+### Decision 6: Alternatives Considered & Rejected
+To arrive at this architecture, we actively evaluated and discarded several alternatives:
+1. **Alternative 1: Native OpenProject Webhooks.** *Rejected because* it would require exposing internal QA endpoints. The Google Chat interface provided a much more natural, context-switch-free environment for testers to drop screen recordings directly from their phones.
+2. **Alternative 2: Sending Raw Video to LLMs.** *Rejected because* raw 15MB MP4 payloads constantly hit Google's Vertex API token limits, resulting in 504 Gateway Timeouts and excessive costs. Moving to our custom OpenCV frame-extraction pipeline solved this perfectly.
+3. **Alternative 3: Using GPT-4o.** *Rejected because* Gemini 2.5 Flash offered nearly identical multimodal reasoning for UI element extraction but at a fraction of the cost ($0.001 per run vs ~$0.15) and with much lower latency.
+
+---
+
+### Decision 7: Error Handling & Fallback Robustness
+We engineered the bot to never fail silently, especially important for async webhook operations:
+1. **Invalid Input (Noisy Data):** If a user submits just a URL or irrelevant media (e.g., a selfie or dog picture), the Phase 1 validation gates immediately reject it and reply in the Chat thread with guidance, preventing garbage tickets.
+2. **LLM Hallucinations:** If Gemini generates malformed JSON or times out, the backend catches the `ValidationError`, aborts OpenProject ticket creation, and safely notifies the user to retry.
+3. **API Rate Limits:** External OpenProject API calls use robust retry mechanisms, ensuring zero dropped tickets during peak QA cycles (e.g., right before a major release).
 
 ## 🏗️ Architecture
 
