@@ -75,6 +75,52 @@ class GcsSyncStatus(BaseModel):
 _last_gcs_sync: Optional[GcsSyncStatus] = None
 
 
+# Registration-loss safeguard (added after QA-audit feedback):
+# Uploads are only safe if the most recent download succeeded (outcome=ok)
+# or proved the bucket was genuinely empty (outcome=skipped). On any error
+# outcome (auth_error, forbidden, network_error, unknown_error, import_error)
+# the local DB is presumed to be a freshly-created empty stand-in and uploading
+# it would WIPE THE PRODUCTION REGISTRATIONS in GCS.
+#
+# Set to True only after a successful or skipped download.
+_uploads_safe: bool = False
+
+
+def _safe_upload_db_to_gcs() -> GcsSyncStatus:
+    """
+    Guarded wrapper around _upload_db_to_gcs.
+
+    If the last download failed (i.e. we have no proof the local DB was
+    restored from GCS), refuse to upload. This protects existing
+    registrations from being clobbered by a fresh empty DB after a transient
+    download failure on cold start.
+
+    Returns a synthetic GcsSyncStatus with outcome='skipped' and a
+    descriptive detail when the upload is suppressed; otherwise delegates
+    to _upload_db_to_gcs.
+    """
+    global _last_gcs_sync
+    if not _uploads_safe:
+        started_at = datetime.now(timezone.utc)
+        finished_at = started_at
+        status = GcsSyncStatus(
+            op="upload",
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_ms=0,
+            outcome="skipped",
+            bytes=0,
+            detail=(
+                "upload suppressed: previous download did not succeed "
+                "(refusing to overwrite GCS with possibly-empty local DB)"
+            ),
+        )
+        logger.warning(status.to_log_string())
+        _last_gcs_sync = status
+        return status
+    return _upload_db_to_gcs()
+
+
 def get_last_gcs_sync() -> Optional[GcsSyncStatus]:
     """Return the most recent GcsSyncStatus snapshot (or None if no sync attempted yet)."""
     return _last_gcs_sync
@@ -329,7 +375,18 @@ async def init_database(database_url: str) -> None:
             os.makedirs(db_dir, exist_ok=True)
         
         # Download DB from GCS (restores registrations from previous deployments)
-        _download_db_from_gcs()
+        download_status = _download_db_from_gcs()
+        # Only allow uploads if we proved the local DB is in sync with GCS
+        # (either ok = restored from existing blob, or skipped = blob genuinely
+        # absent so a fresh DB is the correct starting state).
+        global _uploads_safe
+        _uploads_safe = download_status.outcome in ("ok", "skipped")
+        if not _uploads_safe:
+            logger.error(
+                "GCS download did not succeed (outcome=%s); UPLOADS DISABLED "
+                "to protect existing registrations. Investigate before next deploy.",
+                download_status.outcome,
+            )
 
     _engine = create_async_engine(database_url, echo=False)
     _session_factory = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
@@ -345,8 +402,8 @@ async def close_database() -> None:
     global _engine
     if _engine:
         await _engine.dispose()
-        # Sync DB to GCS before shutdown
-        _upload_db_to_gcs()
+        # Sync DB to GCS before shutdown (guarded — won't run if download failed)
+        _safe_upload_db_to_gcs()
         logger.info("Database connection closed.")
 
 
@@ -413,8 +470,9 @@ async def create_or_update_user(
         await session.commit()
         await session.refresh(user)
     
-    # Sync to GCS immediately after registration change
-    _upload_db_to_gcs()
+    # Sync to GCS immediately after registration change (guarded — won't run
+    # if init_database's download failed, protecting existing GCS data)
+    _safe_upload_db_to_gcs()
     
     return user
 

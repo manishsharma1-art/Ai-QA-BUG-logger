@@ -39,3 +39,6 @@ gcloud_sdk/
 
 # Local documentation
 HACKATHON_*.md
+
+# Hypothesis test cache (per-run state, not source)
+.hypothesis/

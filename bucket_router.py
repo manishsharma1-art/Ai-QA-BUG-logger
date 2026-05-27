@@ -151,6 +151,17 @@ PROJECT_ALIASES = {
     "big buyer": "Big Buyer",
     "tender": "Tender",
     "indiamart affiliate": "IndiaMART Affiliate",
+    # NOTE — known audit gaps (do NOT alias speculatively).
+    # These project names appear in QA briefs but have no entry in
+    # OP_PROJECTS today, so they fall through to device-detection +
+    # Android default. Operator must decide whether each one should be:
+    #   1. a new top-level project added to OP_PROJECTS, or
+    #   2. an alias mapping to an existing project (which one?).
+    # Affected names from the May QA audit:
+    #   - Model Product Library
+    #   - Msite SOI
+    #   - Export
+    # See tests/unit/test_qa_audit_routing.py::test_known_config_gaps_documented.
 }
 
 # ─────────────────────────────────────────────
@@ -193,36 +204,97 @@ def extract_bucket_from_message(text: str) -> Tuple[Optional[int], str]:
       Layer 2: Free-text bucket extraction (scoring-based)
       Layer 3: Device/OS detection (fallback)
     """
-    # Layer 1: Extract [Tag] from message (anchored — must be at the start,
-    # after optional whitespace; rejects free-floating brackets like [step 3]).
-    tag_match = BUCKET_TAG_RE.match(text)
+    pid, txt, _ = extract_bucket_with_provenance(text)
+    return pid, txt
 
+
+# Provenance values returned alongside (project_id, text):
+#   "tag"           — explicit [Tag] at start matched
+#   "freetext"      — free-text scoring or prose phrase matched
+#   "device"        — device-name keyword fired (Samsung/iPhone/etc.)
+#   "default"       — no signal anywhere; Android default used
+# Used by main.py to decide whether to invoke the LLM bucket-picker fallback.
+ROUTING_PROVENANCE = ("tag", "freetext", "device", "default")
+
+
+def extract_bucket_with_provenance(text: str) -> Tuple[Optional[int], str, str]:
+    """
+    Like extract_bucket_from_message but also returns *how* the routing decision
+    was made. The orchestration layer (main.py) uses the provenance to decide
+    whether to invoke the LLM bucket-picker fallback.
+
+    Returns:
+        (project_id, text_for_llm, provenance) where provenance ∈ ROUTING_PROVENANCE.
+    """
+    # Layer 1: Explicit [Tag] at start
+    tag_match = BUCKET_TAG_RE.match(text)
     if tag_match:
         tag = tag_match.group(1).strip()
-
         project_id = _resolve_tag(tag)
         if project_id:
             logger.info(f"Bucket routing: [{tag}] → project {project_id}")
-            return project_id, text
+            return project_id, text, "tag"
         else:
             logger.warning(f"Bucket routing: [{tag}] — no match found, trying free-text")
-            # Tag didn't resolve; fall through to Layer 2
 
-    # Layer 2: Free-text bucket extraction (Theme 4.5)
+    # Layer 2: Free-text bucket extraction (Theme 4.5 + audit prose patterns)
     project_id = _extract_bucket_from_freetext(text)
     if project_id:
         logger.info(f"Bucket routing: free-text match → project {project_id}")
-        return project_id, text
+        return project_id, text, "freetext"
 
-    # Layer 3: Device/OS detection (existing fallback)
-    project_id = _detect_device_platform(text)
-    logger.info(f"Bucket routing: no bucket mention, device detection → project {project_id}")
-    return project_id, text
+    # Layer 3: Device/OS detection — also report whether a real device matched
+    project_id, device_matched = _detect_device_platform_with_provenance(text)
+    if device_matched:
+        logger.info(f"Bucket routing: device-detection → project {project_id}")
+        return project_id, text, "device"
+    logger.info(f"Bucket routing: no signal, falling back to default → project {project_id}")
+    return project_id, text, "default"
+
+
+def _detect_device_platform_with_provenance(text: str) -> Tuple[int, bool]:
+    """Like _detect_device_platform but also reports whether a real device-name
+    keyword matched (True) or the Android default was used (False)."""
+    text_lower = text.lower()
+
+    for device in IOS_DEVICES:
+        if device in text_lower:
+            return OP_PROJECTS.get("iOS", 85), True
+
+    for device in ANDROID_DEVICES:
+        if device in text_lower:
+            return OP_PROJECTS.get("Android", 3), True
+
+    if "ios " in text_lower or "ios:" in text_lower:
+        return OP_PROJECTS.get("iOS", 85), True
+    if "android " in text_lower or "android:" in text_lower:
+        return OP_PROJECTS.get("Android", 3), True
+
+    # No real device signal — Android default
+    return OP_PROJECTS.get("Android", 3), False
 
 
 # Regex for "bucket - X", "bucket: X", "bucket X" shorthand
 _BUCKET_SHORTHAND_RE = re.compile(
     r'\bbucket\s*[-:]?\s*([A-Za-z][A-Za-z0-9 &/\-]{1,40})',
+    re.IGNORECASE,
+)
+
+# Additional prose phrasings used by QA in briefs (audit May 2026):
+#   "should raise bug in <name>", "should be opened in <name>",
+#   "should create in <name>", "raise bug in <name>",
+#   "→ should create in <name>", "→ raise in <name>"
+# Pattern allows a leading arrow / hyphen / colon / dash for the "→" form.
+_BUCKET_PROSE_RE = re.compile(
+    r'(?:->|→|:|\s)\s*'
+    r'(?:should\s+(?:be\s+)?(?:raise(?:d)?|open(?:ed)?|create(?:d)?|file(?:d)?)'
+    r'|raise(?:d)?|open(?:ed)?|create(?:d)?|file(?:d)?)'
+    r'(?:\s+(?:bug|ticket|issue))?'
+    r'\s+in\s+'
+    r'(?:the\s+)?'
+    r'([A-Za-z][A-Za-z0-9 &/\-,.]{1,60}?)'
+    r'(?:\s+(?:project|bucket))?'
+    r'(?:\s*[\.\n,;]|$)',
     re.IGNORECASE,
 )
 
@@ -248,6 +320,19 @@ def _extract_bucket_from_freetext(text: str) -> Optional[int]:
         project_id = _resolve_tag(candidate)
         if project_id:
             return project_id  # explicit shorthand wins immediately
+
+    # ── Step A2: prose patterns from QA audit ──
+    # "should raise bug in <name>", "should be opened in <name>",
+    # "should create in <name>", "raise bug in <name>", "→ should create in <name>"
+    # All variations explicitly state the destination bucket.
+    for prose_match in _BUCKET_PROSE_RE.finditer(text_lower):
+        candidate = prose_match.group(1).strip().rstrip(".,;")
+        # Strip a trailing common noise word that the regex's lazy match might
+        # leave behind (e.g. "Photo Search im bucket" → "Photo Search im").
+        candidate = re.sub(r'\s+(project|bucket)$', '', candidate)
+        project_id = _resolve_tag(candidate)
+        if project_id:
+            return project_id  # prose match wins (very high confidence signal)
 
     # ── Step B: scan for known bucket names and multi-word aliases ──
     # Higher weight = more specific
@@ -325,6 +410,13 @@ def _resolve_tag(tag: str) -> Optional[int]:
                 return OP_PROJECTS[proj_name]
 
     # Step 5: Fuzzy match, cutoff raised to 0.78
+    # Skip for very short tags (< 4 chars): difflib's ratio is too permissive at
+    # short lengths (e.g. 'ns' vs 'pns' has ratio 0.8 ≥ 0.78 even though it's a
+    # bad match). Property 3 requires that mutated typos never resolve to a
+    # *different* project; short tags should hit exact/alias-exact paths or
+    # return None rather than fuzzy-matching to spurious aliases.
+    if len(tag_lower) < 4:
+        return None
     candidates = [n.lower() for n in
                   list(OP_PROJECTS.keys()) + list(PROJECT_ALIASES.keys())]
     matches = get_close_matches(tag_lower, candidates, n=1, cutoff=0.78)

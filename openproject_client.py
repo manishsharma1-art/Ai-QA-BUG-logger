@@ -234,10 +234,21 @@ class OpenProjectClient:
 
                     logger.info(f"Ticket created successfully: #{ticket_id}")
 
+                    # Resolve the canonical project name from OP_PROJECTS so the
+                    # user-facing reply shows the actual destination project
+                    # (e.g. "Desktop Lead Manager"), not the platform field.
+                    # Falls back to platform.upper() only if the project_id has
+                    # no entry in OP_PROJECTS (shouldn't happen).
+                    project_name = next(
+                        (name for name, pid in OP_PROJECTS.items() if pid == project_id),
+                        bug_report.platform.value.upper(),
+                    )
+
                     return {
                         "ticket_id": ticket_id,
                         "ticket_url": ticket_url,
-                        "project": bug_report.platform.value.upper(),
+                        "project": project_name,
+                        "project_id": project_id,
                         "title": bug_report.title,
                         "bug_type": bug_report.bug_type.value,
                         "priority": bug_report.priority.value,

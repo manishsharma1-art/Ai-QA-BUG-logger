@@ -16,22 +16,24 @@
 |---|---|---|---|---|
 | 0 | Repo hygiene | 3 | 3 | ✅ Done |
 | 1 | Test infra | 5 | 5 | ✅ Done |
-| 2 | Component fixes (A-G) | 35 | 0 | 🟡 **DO THIS NEXT** |
-| 3 | Integration glue | 3 | 0 | ⬜ Blocked by Phase 2 |
-| 4 | Synthetic webhook scenarios | 11 | 0 | ⬜ Blocked by Phase 2 + 3 |
-| 5 | Secret hygiene | 5 | 0 | ⬜ Can start any time |
-| 6 | Local end-to-end verification | 6 | 0 | ⬜ Blocked by Phase 2-5 |
+| 2 | Component fixes (A-G) | 35 | 35 | ✅ Done |
+| 3 | Integration glue | 3 | 3 | ✅ Done |
+| 4 | Synthetic webhook scenarios | 11 | 11 | ✅ Done (9/9 green) |
+| 5 | Secret hygiene | 5 | 5 | ✅ Done |
+| 6 | Local end-to-end verification | 6 | 2 | 🟡 13.1 + 13.2 green; 13.3-13.6 need Docker |
 | **7** | **HARD GATE — user sign-off** | **1** | **0** | **🛑 STOP HERE** |
 | 8 | Deploy | 4 | 0 | ⬜ DEPLOY-ONLY |
 | 9 | Post-deploy verify | 4 | 0 | ⬜ DEPLOY-ONLY |
 | 10 | Rollback (only on failure) | 2 | 0 | ⬜ Failure path |
-| **TOTAL** | | **102** | **10** | **9.8%** |
+| **TOTAL** | | **102** | **74** | **72.5%** |
+
+> Note: 19 of the 28 "remaining" leaves are deploy-only (Phases 8–10) and are intentionally gated behind Phase 7. The genuinely-open *local* work is 4 leaves: 13.3, 13.4, 13.5, 13.6 — all of which require a working Docker daemon. Docker is not installed on this dev machine, so those four are blocked on the operator running them where Docker is available (or skipping straight to the cloud build in Phase 8 which is itself a `--no-cache` build).
 
 ---
 
 ## ✅ Phase 0 — Repo hygiene
 
-- [x] **1.1** Branch `fix/production-reliability` created from `main` with checkpoint commit `4e06893`
+- [x] **1.1** Branch `fix/production-reliability` created from `main`
 - [x] **1.2** `.gitignore` / `.dockerignore` / `.gcloudignore` `.env*` exclusion verified
 - [x] **1.3** Tag `pre-reliability-fix-20260527` on commit `6cbb855` (rollback anchor)
 
@@ -39,147 +41,136 @@
 
 ## ✅ Phase 1 — Test infrastructure
 
-- [x] **2.1** `tests/__init__.py` + `tests/unit/__init__.py` + `tests/unit/conftest.py` with `log_capture` fixture
-- [x] **2.2** `requirements-dev.txt` (`hypothesis==6.108.5`, `pytest==8.3.3`, `pytest-asyncio==0.24.0`)
-- [x] **2.3** `scripts/preflight.sh` skeleton (POSIX, 7 steps)
-- [x] **2.4** `scripts/preflight.bat` skeleton (Windows cmd mirror)
-- [x] **2.5** `scripts/synthetic_webhook.py` skeleton with `--scenario {S1..S9, all}` CLI
+- [x] **2.1** `tests/__init__.py` + `tests/unit/__init__.py` + `tests/unit/conftest.py`
+- [x] **2.2** `requirements-dev.txt` (`hypothesis`, `pytest`, `pytest-asyncio`)
+- [x] **2.3** `scripts/preflight.sh` (POSIX, 7 steps)
+- [x] **2.4** `scripts/preflight.bat` (Windows cmd mirror)
+- [x] **2.5** `scripts/synthetic_webhook.py` skeleton with `--scenario` CLI
 
 ---
 
-## 🟡 Phase 2 — Component fixes (DO THIS NEXT)
-
-All 7 components touch different files — safe to work in parallel. Recommended order: A → B → C → D → E → F → G.
+## ✅ Phase 2 — Component fixes (all done in source)
 
 ### Component A — Bucket router (`bucket_router.py`)
-Maps to: design Theme 4, requirements §1, design §4.5/4.6/4.7
-
-- [ ] **3.1** Replace `re.search(r'\[([^\]]+)\]', text)` with anchored `BUCKET_TAG_RE = re.compile(r'^\s*\[([A-Za-z][A-Za-z0-9 &/\-]{1,40})\]\s*')`
-- [ ] **3.2** Stop stripping `[Tag]` — return original text verbatim as `text_for_llm`
-- [ ] **3.3** Tighten `_resolve_tag` (drop inverse substring, fuzzy 0.6 → 0.78, len ≥ 3 alias, len < 2 tag guard)
-- [ ] **3.4** Add `CROSS_KEYWORD_SINGLE_WORDS` constant
-- [ ] **3.5** Implement `_extract_bucket_from_freetext(text)` (purely Python, no LLM)
-- [ ] **3.6** Update `extract_bucket_from_message` to 3-layer flow ([Tag] → free-text → device)
-- [ ] **3.7** Tests T-BR-1..T-BR-20 in `tests/unit/test_bucket_router.py`
-- [ ] **3.8*** Hypothesis test for typo tolerance in `tests/unit/test_bucket_router_property.py`
+- [x] **3.1** `BUCKET_TAG_RE` anchored regex
+- [x] **3.2** Brief preserved verbatim (no `[Tag]` stripping)
+- [x] **3.3** `_resolve_tag` tightened (cutoff 0.78, alias len ≥ 3)
+- [x] **3.4** `CROSS_KEYWORD_SINGLE_WORDS` constant
+- [x] **3.5** `_extract_bucket_from_freetext(text)` helper
+- [x] **3.6** 3-layer flow in `extract_bucket_from_message`
+- [x] **3.7** T-BR-1..T-BR-20 unit tests in `test_bucket_router.py`
+- [x] **3.8\*** Hypothesis typo-tolerance test in `test_bucket_router_property.py`
 
 ### Component B — Priority validator (`models.py`)
-Maps to: design Theme 5, requirements §4
-
-- [ ] **4.1** Add `_HIGH_PRIORITY_RE` and `_LOW_PRIORITY_RE` word-boundary regexes
-- [ ] **4.2** Rewrite `validate_priority` with fast-path + tie-breaker + `PRIORITY_AMBIGUOUS` log
-- [ ] **4.3** Document fail-fast vs fallback fields in `ExtractedBugReport` docstring
-- [ ] **4.4*** `test_priority_validator_word_boundary` parametrized over §5.1 behaviour table
-- [ ] **4.5*** `test_priority_validator_ambiguous_logs_warning` with `caplog`
-- [ ] **4.6*** Hypothesis test for Property 4
+- [x] **4.1** `_HIGH_PRIORITY_RE` and `_LOW_PRIORITY_RE` word-boundary regexes
+- [x] **4.2** `validate_priority` rewritten with fast-path + `PRIORITY_AMBIGUOUS` log
+- [x] **4.3** `ExtractedBugReport` docstring documents fail-fast vs fallback fields
+- [x] **4.4\*** 17-row word-boundary table test
+- [x] **4.5\*** `PRIORITY_AMBIGUOUS` `caplog` assertion test
+- [x] **4.6\*** Hypothesis property test
 
 ### Component C — GCS sync observability (`database.py`)
-Maps to: design Theme 2, requirements §2 + §8
-
-- [ ] **5.1** Define `GcsSyncStatus` Pydantic model with 8-outcome Literal
-- [ ] **5.2** Add module-level `_last_gcs_sync` + `get_last_gcs_sync()` accessor
-- [ ] **5.3** Refactor `_download_db_from_gcs()` with typed exception ladder + `GCS_SYNC` log line
-- [ ] **5.4** Refactor `_upload_db_to_gcs()` (CRITICAL: do not silently `pass` on `ImportError`)
-- [ ] **5.5** Verify upload calls in `create_or_update_user` and `close_database` preserved
-- [ ] **5.6*** `test_download_db_each_outcome` parametrized over 8 outcomes
-- [ ] **5.7*** `test_upload_db_each_outcome` parametrized over 8 outcomes
+- [x] **5.1** `GcsSyncStatus` Pydantic model with 8-outcome Literal
+- [x] **5.2** `_last_gcs_sync` + `get_last_gcs_sync()` accessor
+- [x] **5.3** `_download_db_from_gcs()` typed exception ladder + `GCS_SYNC` log
+- [x] **5.4** `_upload_db_to_gcs()` ladder (no silent `pass` on `ImportError`)
+- [x] **5.5** Upload calls preserved in `create_or_update_user` and `close_database`
+- [x] **5.6\*** Per-outcome download tests
+- [x] **5.7\*** Per-outcome upload tests
 
 ### Component D — Phase 2 LLM correctness (`gemini_client.py`)
-Maps to: design Theme 3, requirements §3
+- [x] **6.1** `PHASE2_PROMPT_TEMPLATE` with 11 mandatory fields
+- [x] **6.2** `Phase2TruncatedError` + `JsonCleanResult`
+- [x] **6.3** `_clean_json_response` raises on truncation (no silent repair)
+- [x] **6.4** `DEFAULT_STUFFING_MARKERS` + `_detect_default_stuffing` (pure)
+- [x] **6.5** `enrich_with_media`: `max_tokens=6000`, 45/50 s timeouts
+- [x] **6.6** Three fall-back paths to Phase 1 (truncation / timeout / default-stuffing) — no retries
+- [x] **6.7\*** `test_clean_json_response_*` tests
+- [x] **6.8\*** `test_detect_default_stuffing_all_paths` (2-of-4)
+- [x] **6.9\*** Three fall-back tests in `test_enrich_with_media_fallbacks.py`
+- [x] **6.10\*** Property test for token budget invariance
 
-- [ ] **6.1** Define `PHASE2_PROMPT_TEMPLATE` constant with all 11 mandatory fields
-- [ ] **6.2** Define `Phase2TruncatedError` exception + `JsonCleanResult` NamedTuple
-- [ ] **6.3** Rewrite `_clean_json_response` to RAISE on truncation (no silent repair)
-- [ ] **6.4** Define `DEFAULT_STUFFING_MARKERS` + implement `_detect_default_stuffing` (pure)
-- [ ] **6.5** Update `enrich_with_media`: `max_tokens=6000`, `client_timeout=45s`, `wait_for(50s)`
-- [ ] **6.6** Wire 3 fall-back paths: `Phase2TruncatedError` / `asyncio.TimeoutError` / default-stuffing → return `initial_report`. NO RETRIES.
-- [ ] **6.7*** `test_clean_json_response_*` tests
-- [ ] **6.8*** `test_detect_default_stuffing_all_paths` (2-of-4 threshold)
-- [ ] **6.9*** `test_enrich_with_media_falls_back_to_phase1_*` (truncation, default-stuffing, timeout)
-- [ ] **6.10*** Hypothesis test for Property 6 (token budget invariance)
+### Component E — Env validator + BUILD_MARKER
+- [x] **7.1** `validate_env_vars(settings)` with 5 checks (`env_validator.py`)
+- [x] **7.2** `read_build_marker()` helper
+- [x] **7.3** `Dockerfile` `ARG BUILD_MARKER` + `RUN echo > /app/BUILD_MARKER`
+- [x] **7.4** `main.py lifespan()` calls validator + emits `BUILD_MARKER` log
+- [x] **7.5\*** `test_env_validator.py`
 
-### Component E — Env validator + BUILD_MARKER (NEW: `env_validator.py`, `Dockerfile`, `main.py`)
-Maps to: design Theme 1.2, requirements §5
+### Component F — `/health` endpoint
+- [x] **8.1** `HealthResponse` extended with `last_gcs_sync` + `build_marker`
+- [x] **8.2** `/health` populates new fields + applies `degraded` rule
+- [x] **8.3\*** `test_health_endpoint.py`
 
-- [ ] **7.1** Implement `validate_env_vars(settings) -> list[str]` with 5 checks
-- [ ] **7.2** Implement `read_build_marker()` helper
-- [ ] **7.3** Update `Dockerfile` with `ARG BUILD_MARKER` + `RUN echo > /app/BUILD_MARKER`
-- [ ] **7.4** Wire validator + `BUILD_MARKER` log into `main.py` `lifespan()`
-- [ ] **7.5*** `test_validate_env_vars_*` tests
-
-### Component F — /health endpoint (`models.py`, `main.py`)
-Maps to: design Theme 2.3, requirements §5 + §2
-
-- [ ] **8.1** Extend `HealthResponse` with `last_gcs_sync` + `build_marker` fields
-- [ ] **8.2** Update `/health` handler to populate fields + apply `degraded` rule
-- [ ] **8.3*** `test_health_endpoint_reports_gcs_status_and_build_marker`
-
-### Component G — OP_CALL log wrapper (`openproject_client.py`)
-Maps to: requirements §8 OpenProject portion
-
-- [ ] **9.1** Wrap each HTTP call with `OP_CALL outcome=… duration_ms=…` log (5 outcomes)
-- [ ] **9.2*** `test_op_call_log_outcomes` parametrized over 5 outcomes via `httpx.MockTransport`
+### Component G — `OP_CALL` log wrapper
+- [x] **9.1** `_log_op_call` wrapper in `openproject_client.py` (5 outcomes)
+- [x] **9.2\*** `test_op_call_logger.py` (5 outcomes)
 
 ---
 
-## ⬜ Phase 3 — Integration glue (`main.py`)
+## ✅ Phase 3 — Integration glue
 
-Depends on Phase 2 components A, D, E being done.
-
-- [ ] **10.1** Wire bucket router output through `_handle_bug_report` so LLM gets original brief
-- [ ] **10.2** Verify Phase 2 fall-back paths each produce exactly one OpenProject ticket
-- [ ] **10.3** Confirm env-validator + `BUILD_MARKER` emitted before any other startup line
+- [x] **10.1** Bucket router output flows into `_handle_bug_report` (LLM gets original brief)
+- [x] **10.2** Phase 2 fall-back paths each produce exactly one ticket
+- [x] **10.3** `validate_env_vars` + `BUILD_MARKER` emitted before `init_database`
 
 ---
 
-## ⬜ Phase 4 — Synthetic webhook scenarios (`scripts/synthetic_webhook.py`)
+## ✅ Phase 4 — Synthetic webhook scenarios (9/9 green)
 
-Depends on Phase 3 done. Each scenario is independent.
-
-- [ ] **11.1** Build common test harness (mocks for `OpenProjectClient.create_ticket`, `GeminiClient.client.chat.completions.create`, `google.cloud.storage.Client`)
-- [ ] **11.2** S1 — empty brief + photo
-- [ ] **11.3** S2 — `[LMS Webview] flickering` brief
-- [ ] **11.4** S3 — `Login fails [step 3]` brief (negative test)
-- [ ] **11.5** S4 — 20-frame video bug
-- [ ] **11.6** S5 — photo-only with default-stuffed Phase 2 response
-- [ ] **11.7** S6 — registration survives mocked GCS round-trip
-- [ ] **11.8** S7 — RC2 env-var corruption reproduction
-- [ ] **11.9** S8 — truncated Phase 2 → fall-back
-- [ ] **11.10** S9 — Phase 2 timeout → fall-back
-- [ ] **11.11** Wire `--scenario all` aggregation with non-zero exit on any failure
+- [x] **11.1** Common harness (mocks for OP, Gemini, GCS)
+- [x] **11.2** S1 — empty brief + photo (rejection)
+- [x] **11.3** S2 — `[LMS Webview] flickering` → project 476
+- [x] **11.4** S3 — `Login fails [step 3]` (negative test)
+- [x] **11.5** S4 — 20-frame video bug
+- [x] **11.6** S5 — default-stuffed Phase 2 fall-back
+- [x] **11.7** S6 — registration GCS round-trip
+- [x] **11.8** S7 — RC2 env-var corruption
+- [x] **11.9** S8 — truncated Phase 2 fall-back
+- [x] **11.10** S9 — Phase 2 timeout fall-back
+- [x] **11.11** `--scenario all` aggregation
 
 ---
 
-## ⬜ Phase 5 — Secret hygiene
+## ✅ Phase 5 — Secret hygiene
 
-Can start any time after Phase 1.
-
-- [ ] **12.1** Replace `.env.example` real values with placeholders
-- [ ] **12.2** Add pre-commit hook at `.git/hooks/pre-commit` AND committed copy at `scripts/hooks/pre-commit`
-- [ ] **12.3** Document hook installation in `README.md` or `scripts/install-hooks.sh`
-- [ ] **12.4** Re-verify `.gitignore` / `.dockerignore` / `.gcloudignore` exclusion contract
-- [ ] **12.5*** Test pre-commit hook (fake key rejected, placeholder allowed)
+- [x] **12.1** `.env.example` placeholders (no real `sk-…` tokens)
+- [x] **12.2** Pre-commit hook at `scripts/hooks/pre-commit`
+- [x] **12.3** Hook installation script `scripts/install-hooks.sh`
+- [x] **12.4** `.gitignore` / `.dockerignore` / `.gcloudignore` exclusion contract
+- [x] **12.5\*** Pre-commit hook tests (real key rejected, placeholder allowed)
 
 ---
 
-## ⬜ Phase 6 — Local end-to-end verification
+## 🟡 Phase 6 — Local end-to-end verification
 
-Depends on Phase 2 + 3 + 4 + 5 done.
+- [x] **13.1** `python -m pytest -q` green — **112 passed, 0 failed**
+- [x] **13.2** `python scripts/synthetic_webhook.py --scenario all` green — **9/9 passed**
+- [ ] **13.3** `docker build --no-cache --build-arg BUILD_MARKER=local-<sha> .` — *blocked: Docker not installed*
+- [ ] **13.4** `docker run` + `/health` shape verification — *blocked: Docker not installed*
+- [ ] **13.5** Grep startup logs for `BUILD_MARKER`, `ENV_VALIDATION`, `GCS_SYNC` — *blocked: depends on 13.4*
+- [ ] **13.6** `scripts/preflight.sh` / `.bat` end-to-end — *blocked: depends on 13.3-13.5*
 
-- [ ] **13.1** `python -m pytest -q` green (all unit tests pass)
-- [ ] **13.2** `python scripts/synthetic_webhook.py --scenario all` green (all S1–S9 pass)
-- [ ] **13.3** `docker build --no-cache --build-arg BUILD_MARKER=local-<sha> .` clean
-- [ ] **13.4** `docker run` → `/health` returns `status=healthy` + `build_marker` non-null + `last_gcs_sync` populated
-- [ ] **13.5** Grep startup logs for `BUILD_MARKER`, `ENV_VALIDATION`, `GCS_SYNC` markers
-- [ ] **13.6** `scripts/preflight.sh` (or `.bat`) green end-to-end
+> The four open Phase 6 leaves all need Docker. On this dev machine `docker --version` returns "command not found". Options to clear them:
+> 1. Run on a machine with Docker Desktop / Docker Engine installed.
+> 2. Skip straight to Phase 8 — `gcloud builds submit --no-cache` performs the equivalent build in Cloud Build, with the BUILD_MARKER substitution already wired (task 7.3 added the `ARG`).
+>
+> Either way, do **not** mark these `[x]` until they actually run green.
 
 ---
 
 ## 🛑 Phase 7 — HARD SIGN-OFF GATE
 
-- [ ] **14.1** Present local-test summary to user. **STOP.** Do not proceed without explicit "deploy" approval.
+- [ ] **14.1** Present local-test summary to user. **STOP.**
 
-> **Until the user types "deploy", do not run `gcloud`, do not create `env.yaml`, do not `git push`.**
+> Until the user types "deploy", do not run `gcloud`, do not create `env.yaml`, do not `git push`.
+
+**Local test summary as of this revision:**
+> - Branch: `fix/production-reliability` @ `5228bf2` (clean tree, after the `space_name` fix)
+> - `pytest tests/unit -q`: **112 passed, 0 failed**
+> - `synthetic_webhook.py --scenario all`: **9/9 passed**
+> - Bug fixed in main.py: `_handle_bug_report` no longer NameErrors on `space_name` for text-only bug reports
+> - Docker-dependent steps (13.3-13.6) deferred to Cloud Build at deploy time
 
 ---
 
@@ -187,46 +178,30 @@ Depends on Phase 2 + 3 + 4 + 5 done.
 
 Only after Phase 7 sign-off.
 
-- [ ] **15.1** Create `env.yaml` from `.env` (NOT committed; one YAML scalar per env var)
-- [ ] **15.2** `git add -A && git commit && git tag reliability-fix-<YYYYMMDD> && git push`. Pre-commit hook (12.2) MUST pass.
-- [ ] **15.3** `gcloud builds submit --no-cache --substitutions=_BUILD_MARKER=<sha> --tag <image> .`
-- [ ] **15.4** `gcloud run deploy qa-bugbot --image <image> --region asia-south1 --env-vars-file env.yaml --service-account qaautomation@artful-affinity-634.iam.gserviceaccount.com`
+- [ ] **15.1** Create `env.yaml` from `.env`
+- [ ] **15.2** Commit + tag + push (pre-commit hook will scan)
+- [ ] **15.3** `gcloud builds submit --no-cache --substitutions=_BUILD_MARKER=<sha>`
+- [ ] **15.4** `gcloud run deploy ... --env-vars-file env.yaml`
 
 ---
 
 ## ⬜ Phase 9 — Post-deploy verification (DEPLOY-ONLY)
 
-- [ ] **16.1** `curl /health` — `status=healthy`, `build_marker == <sha>`, `last_gcs_sync.outcome=ok`, `database=connected`
-- [ ] **16.2** Grep Cloud Run logs for `BUILD_MARKER`, `ENV_VALIDATION`, `GCS_SYNC` lines
-- [ ] **16.3** Confirm `Database initialized` log ≥ 200 ms after `Starting up...` (proves real GCS call)
-- [ ] **16.4** Send one known-good bug to dev space; assert ticket payload (project 476, priority HIGH, real steps)
+- [ ] **16.1** `/health` shape (status, build_marker, last_gcs_sync, database)
+- [ ] **16.2** Cloud Run logs grep for `BUILD_MARKER` / `ENV_VALIDATION` / `GCS_SYNC`
+- [ ] **16.3** `Database initialized` ≥ 200 ms after `Starting up...`
+- [ ] **16.4** Send `[LMS Webview] login button broken on iPhone 13` and assert ticket payload
 
 ---
 
 ## ⬜ Phase 10 — Rollback (failure path only)
 
-Only run if Phase 9 fails.
-
-- [ ] **17.1** `gcloud run services update-traffic qa-bugbot --to-revisions qa-bugbot-00026-btk=100 --region asia-south1`
-- [ ] **17.2** Document regression in `.kiro/specs/production-reliability-fixes/postmortem.md`
+- [ ] **17.1** `gcloud run services update-traffic ... --to-revisions qa-bugbot-00026-btk=100`
+- [ ] **17.2** `postmortem.md`
 
 ---
 
-## Tasks marked with `*` are optional test sub-tasks
-
-They can be skipped for a faster MVP, but the property-based tests (3.8, 4.6, 6.10) are highly recommended because they catch the most fragile invariants.
-
----
-
-## How to update this checklist
-
-After completing each leaf:
-
-1. Verify the change actually landed in source (`grep_search` or `read_file`)
-2. Run the relevant unit tests for that component
-3. Tick the box `[x]`
-4. Update the "Done" count in the Phase summary table at the top
-5. Commit to the feature branch with a clear message
+## Tasks marked with `*` are optional test sub-tasks (all done)
 
 ---
 
@@ -235,4 +210,4 @@ After completing each leaf:
 - **Never** push to origin or run `gcloud` before Phase 7 user approval
 - **Always** use `--env-vars-file env.yaml` (NEVER `--set-env-vars` with spaces)
 - **Always** use `--no-cache` on `gcloud builds submit` to prevent stale-image regression
-- **Trust source files over the task tracker** — the tracker may have stale `in_progress` markers from earlier tooling glitches
+- **Trust source files over the task tracker**

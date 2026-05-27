@@ -115,6 +115,110 @@ def _detect_default_stuffing(report: ExtractedBugReport) -> tuple[bool, list[str
 
 
 # ─────────────────────────────────────────────
+# LLM_CALL gateway observability (Phase 1 + Phase 2 wrapper)
+# ─────────────────────────────────────────────
+# Mirrors OP_CALL in openproject_client.py. Five outcomes — every gateway
+# call (Phase 1, Phase 2, smoke test, content screen) emits exactly one
+# `LLM_CALL phase=… outcome=… duration_ms=…` line so /logs greppable.
+
+import time as _time
+import re as _re
+
+
+class LLMGatewayError(Exception):
+    """Categorised gateway error. The .outcome attribute is one of:
+    auth_error | rate_limit | server_error | network_error | unknown_error.
+    .retry_after_s is populated for rate_limit when the gateway sends one.
+    """
+
+    def __init__(self, outcome: str, message: str, retry_after_s: Optional[int] = None):
+        self.outcome = outcome
+        self.retry_after_s = retry_after_s
+        super().__init__(message)
+
+
+def _classify_gateway_exception(exc: BaseException) -> str:
+    """
+    Map an arbitrary exception raised by the OpenAI SDK / httpx into one of
+    the five LLM_CALL outcomes. Pure function. Best-effort — we use duck
+    typing because the openai SDK's exception classes are version-specific.
+    """
+    name = type(exc).__name__
+    lname = name.lower()
+    msg = str(exc)
+    lmsg = msg.lower()
+
+    # Auth errors first — these are unrecoverable and ops-actionable
+    if "authentication" in lname or "permission" in lname:
+        return "auth_error"
+    if "authentication" in lmsg or "unauthorized" in lmsg or "forbidden" in lmsg:
+        return "auth_error"
+    if "401" in msg or "403" in msg:
+        return "auth_error"
+    if "invalid api key" in lmsg or "invalid_api_key" in lmsg:
+        return "auth_error"
+
+    # Rate limit
+    if "ratelimit" in lname or "429" in msg or "rate limit" in lmsg or "too many" in lmsg:
+        return "rate_limit"
+
+    # Server-side gateway failure
+    if "internalserver" in lname or "badgateway" in lname or "serviceunavailable" in lname:
+        return "server_error"
+    if _re.search(r"\b50[0234]\b", msg):
+        return "server_error"
+    if "internal server error" in lmsg or "service unavailable" in lmsg:
+        return "server_error"
+
+    # Network / connection
+    if "connection" in lname or "timeout" in lname or "apiconnection" in lname:
+        return "network_error"
+    if "timed out" in lmsg or "connection refused" in lmsg or "could not connect" in lmsg:
+        return "network_error"
+
+    return "unknown_error"
+
+
+def _log_llm_call(
+    phase: str,
+    start_ts: float,
+    *,
+    response_chars: int = 0,
+    exc: Optional[BaseException] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Emit a single structured LLM_CALL log line.
+
+    phase: 'phase1' | 'phase2' | 'smoke' | 'screen'
+    Returns the outcome string for the caller to use in fall-back decisions.
+    """
+    duration_ms = int((_time.time() - start_ts) * 1000)
+    if exc is None:
+        outcome = "ok"
+        detail = f"chars={response_chars}"
+        level = logging.INFO
+    else:
+        outcome = _classify_gateway_exception(exc)
+        # Truncate detail to keep log lines bounded
+        msg = str(exc).replace('"', "'")
+        if len(msg) > 200:
+            msg = msg[:197] + "..."
+        detail = f'{type(exc).__name__}="{msg}"'
+        level = logging.WARNING if outcome != "unknown_error" else logging.ERROR
+
+    extra_str = ""
+    if extra:
+        extra_str = " " + " ".join(f"{k}={v}" for k, v in extra.items())
+    logger.log(
+        level,
+        "LLM_CALL phase=%s outcome=%s duration_ms=%d %s%s",
+        phase, outcome, duration_ms, detail, extra_str,
+    )
+    return outcome
+
+
+# ─────────────────────────────────────────────
 # System Prompt for Bug Analysis
 # ─────────────────────────────────────────────
 
@@ -327,6 +431,7 @@ class GeminiClient:
         try:
             loop = asyncio.get_event_loop()
 
+            start_ts = _time.time()
             response = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
@@ -343,6 +448,7 @@ class GeminiClient:
             )
 
             response_text = response.choices[0].message.content
+            _log_llm_call("phase1", start_ts, response_chars=len(response_text or ""))
             logger.info(f"Phase 1 LLM response: {response_text[:300]}")
 
             cleaned = self._clean_json_response(response_text)
@@ -350,14 +456,18 @@ class GeminiClient:
             return ExtractedBugReport(**result_json)
 
         except asyncio.TimeoutError:
+            _log_llm_call("phase1", start_ts, exc=TimeoutError("phase1 wait_for 22s"))
             logger.error("Phase 1 timed out after 22s")
-            raise TimeoutError("Text analysis timed out. Please try again.")
+            raise LLMGatewayError("network_error", "Text analysis timed out") from None
         except json.JSONDecodeError as e:
             logger.error(f"Phase 1 JSON parse failed: {e}")
-            raise ValueError(f"AI returned invalid response: {e}")
-        except Exception as e:
-            logger.error(f"Phase 1 failed: {e}")
+            raise ValueError(f"AI returned invalid response: {e}") from e
+        except LLMGatewayError:
             raise
+        except Exception as e:
+            outcome = _log_llm_call("phase1", start_ts, exc=e)
+            logger.error(f"Phase 1 failed (outcome={outcome}): {e}")
+            raise LLMGatewayError(outcome, str(e)) from e
 
     async def enrich_with_media(
         self,
@@ -444,6 +554,7 @@ class GeminiClient:
         # ── Single attempt, no retries (Theme 3.2) ──
         try:
             loop = asyncio.get_event_loop()
+            start_ts = _time.time()
             response = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
@@ -458,7 +569,17 @@ class GeminiClient:
                 ),
                 timeout=50.0  # Theme 3.2.1: asyncio.wait_for timeout
             )
+            _log_llm_call(
+                "phase2", start_ts,
+                response_chars=len(response.choices[0].message.content or ""),
+                extra={"frames": frame_count},
+            )
         except asyncio.TimeoutError:
+            _log_llm_call(
+                "phase2", start_ts,
+                exc=TimeoutError("phase2 wait_for 50s"),
+                extra={"frames": frame_count},
+            )
             # Fall-back path 2: timeout → return Phase 1 result
             logger.error(
                 "PHASE2_SLOW outcome=timeout duration_ms=50000 frames=%d",
@@ -466,6 +587,7 @@ class GeminiClient:
             )
             return initial_report
         except Exception as e:
+            _log_llm_call("phase2", start_ts, exc=e, extra={"frames": frame_count})
             logger.error(f"Phase 2 LLM call failed: {e}")
             return initial_report
 
@@ -755,19 +877,147 @@ class GeminiClient:
             return {"is_valid": True, "reason": f"Screening failed ({e}), allowing through."}
 
     async def check_health(self) -> bool:
-        """Check if LLM API is accessible."""
+        """Check if LLM API is accessible. Kept for backwards compatibility."""
+        result = await self.smoke_test()
+        return result["outcome"] == "ok"
+
+    async def smoke_test(self, timeout_s: float = 8.0) -> Dict[str, Any]:
+        """
+        One-token health probe of the gateway. Designed to run at startup so
+        that an invalid/expired/rotated key is caught BEFORE any user-facing
+        webhook is processed.
+
+        Returns a dict with keys:
+          outcome: 'ok' | 'auth_error' | 'rate_limit' | 'server_error' |
+                   'network_error' | 'unknown_error'
+          duration_ms: int
+          detail: str (short, log-safe)
+
+        Never raises.
+        """
+        import asyncio
+        start_ts = _time.time()
         try:
-            import asyncio
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": "Reply with: OK"}],
-                    max_tokens=10,
+            response = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[{"role": "user", "content": "ping"}],
+                        max_tokens=1,
+                        timeout=timeout_s,
+                    ),
                 ),
+                timeout=timeout_s + 2.0,
             )
-            return bool(response.choices[0].message.content)
+            chars = len(response.choices[0].message.content or "")
+            _log_llm_call("smoke", start_ts, response_chars=chars)
+            return {
+                "outcome": "ok",
+                "duration_ms": int((_time.time() - start_ts) * 1000),
+                "detail": f"chars={chars}",
+            }
+        except asyncio.TimeoutError as e:
+            outcome = _log_llm_call("smoke", start_ts, exc=TimeoutError(f"smoke {timeout_s}s"))
+            return {
+                "outcome": outcome,
+                "duration_ms": int((_time.time() - start_ts) * 1000),
+                "detail": "timeout",
+            }
         except Exception as e:
-            logger.error(f"LLM health check failed: {e}")
-            return False
+            outcome = _log_llm_call("smoke", start_ts, exc=e)
+            return {
+                "outcome": outcome,
+                "duration_ms": int((_time.time() - start_ts) * 1000),
+                "detail": f"{type(e).__name__}",
+            }
+
+    async def pick_bucket(
+        self,
+        brief: str,
+        candidates: List[str],
+        timeout_s: float = 6.0,
+    ) -> Optional[str]:
+        """
+        LLM bucket-picker fallback (audit gap closure).
+
+        Called by main.py ONLY when deterministic routing in bucket_router
+        falls through to the default (provenance == "default"), e.g. when
+        a QA brief mentions a project name we don't have an alias for.
+
+        Returns the canonical project name (one of `candidates`) or None
+        if the LLM can't pick one with confidence. Never raises.
+
+        Cost: one extra ~1-2s gateway call only on the rare default-fallback
+        path. Latency is bounded by `timeout_s`. On any gateway failure the
+        function returns None so the caller falls back to the deterministic
+        Android default.
+        """
+        import asyncio
+
+        if not brief or not candidates:
+            return None
+
+        # Trim candidate list to a sane size for prompt economy
+        candidate_block = "\n".join(f"- {c}" for c in candidates[:80])
+
+        prompt = (
+            "You are routing a bug report to one of the OpenProject projects "
+            "below. Read the brief and pick the SINGLE canonical project name "
+            "that best matches the QA tester's intent.\n\n"
+            "RULES:\n"
+            "- Reply with ONLY the canonical name from the list, exactly as written.\n"
+            "- If the brief is too vague to pick confidently, reply with the "
+            "single word: NONE\n"
+            "- Do NOT invent project names. Do NOT add commentary.\n\n"
+            f"PROJECTS:\n{candidate_block}\n\n"
+            f"BRIEF:\n{brief}\n\n"
+            "ANSWER:"
+        )
+
+        start_ts = _time.time()
+        try:
+            loop = asyncio.get_event_loop()
+            response = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=40,
+                        temperature=0.0,
+                        timeout=timeout_s,
+                    ),
+                ),
+                timeout=timeout_s + 2.0,
+            )
+            answer = (response.choices[0].message.content or "").strip()
+            _log_llm_call(
+                "bucket_picker", start_ts,
+                response_chars=len(answer),
+                extra={"answer": repr(answer[:60])},
+            )
+        except Exception as e:
+            _log_llm_call("bucket_picker", start_ts, exc=e)
+            return None
+
+        # Strip common trailing punctuation/quotes the LLM may add
+        answer = answer.strip().strip('"').strip("'").rstrip(".,;")
+        if not answer or answer.upper() == "NONE":
+            return None
+
+        # Case-insensitive exact match against candidates (the LLM may
+        # change case e.g. lowercase "android" → canonical "Android")
+        for c in candidates:
+            if c.lower() == answer.lower():
+                return c
+
+        # Best-effort substring match (e.g. answer "Photo Search IM" → "Photo Search")
+        for c in candidates:
+            if c.lower() in answer.lower() or answer.lower() in c.lower():
+                if len(c) >= 4 and len(answer) >= 4:
+                    return c
+
+        # No confident match
+        return None

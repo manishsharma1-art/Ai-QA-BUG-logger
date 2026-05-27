@@ -163,7 +163,70 @@ async def scenario_S5() -> None:
 
 async def scenario_S6() -> None:
     # S6 — registration survives mocked GCS round-trip
-    pass
+    # Register user A on instance 1, simulate cold start on instance 2 against
+    # the same in-memory bucket, assert user is still found.
+    import database
+    import tempfile, os
+    from unittest.mock import patch, MagicMock
+
+    bucket_state = {"content": b""}
+
+    def _fresh_blob() -> MagicMock:
+        blob = MagicMock()
+        blob.exists.side_effect = lambda: len(bucket_state["content"]) > 0
+        def download(target):
+            with open(target, "wb") as f:
+                f.write(bucket_state["content"])
+        def upload(source):
+            with open(source, "rb") as f:
+                bucket_state["content"] = f.read()
+        blob.download_to_filename.side_effect = download
+        blob.upload_from_filename.side_effect = upload
+        return blob
+
+    fake_module = MagicMock()
+    fake_client = MagicMock()
+    fake_bucket = MagicMock()
+    fake_bucket.blob.side_effect = lambda *_a, **_k: _fresh_blob()
+    fake_client.bucket.return_value = fake_bucket
+    fake_module.Client.return_value = fake_client
+
+    with tempfile.TemporaryDirectory() as td:
+        path_a = os.path.join(td, "a", "qa_bugbot.db")
+        path_b = os.path.join(td, "b", "qa_bugbot.db")
+        os.makedirs(os.path.dirname(path_a))
+        os.makedirs(os.path.dirname(path_b))
+
+        with patch.dict("sys.modules", {"google.cloud.storage": fake_module}):
+            # Instance 1: register
+            with patch.object(database, "LOCAL_DB_PATH", path_a):
+                database._engine = None
+                database._session_factory = None
+                database._uploads_safe = False
+                database._last_gcs_sync = None
+                await database.init_database(f"sqlite+aiosqlite:///{path_a}")
+                assert database._uploads_safe, "uploads must be safe on empty bucket"
+                await database.create_or_update_user(
+                    chat_user_name="users/syn_S6",
+                    chat_display_name="Synth User",
+                    openproject_api_key="apikey-syn-s6",
+                )
+                assert len(bucket_state["content"]) > 0, "GCS upload didn't run"
+                await database.close_database()
+
+            # Instance 2: cold start, must restore
+            with patch.object(database, "LOCAL_DB_PATH", path_b):
+                database._engine = None
+                database._session_factory = None
+                database._uploads_safe = False
+                database._last_gcs_sync = None
+                await database.init_database(f"sqlite+aiosqlite:///{path_b}")
+                snap = database.get_last_gcs_sync()
+                assert snap and snap.outcome == "ok", f"restore failed: {snap and snap.outcome}"
+                user = await database.get_user_by_chat_id("users/syn_S6")
+                assert user is not None, "S6 FAIL: registered user lost across restart"
+                assert user.openproject_api_key == "apikey-syn-s6"
+                await database.close_database()
 
 async def scenario_S7() -> None:
     # S7 — RC2 env-var corruption reproduction

@@ -21,7 +21,10 @@ from contextlib import asynccontextmanager
 
 from config import get_settings
 from env_validator import validate_env_vars, read_build_marker
-from bucket_router import extract_bucket_from_message
+from bucket_router import (
+    extract_bucket_from_message,
+    extract_bucket_with_provenance,
+)
 from database import (
     init_database, close_database, check_database_health,
     get_user_by_chat_id, create_or_update_user,
@@ -81,6 +84,13 @@ _active_background_tasks = set()
 # Surfaced through /health.build_marker by task 8.2
 _build_marker: str = ""
 
+# LLM gateway smoke test result captured at startup. Populated by lifespan
+# after gemini_client is constructed. Used by /health to surface
+# `gemini=ok|auth_error|rate_limit|server_error|network_error|unknown_error`
+# instead of the prior boolean `configured/not configured`. None means
+# "smoke test never ran" (e.g. LLM_API_KEY was empty).
+_llm_smoke_result: Optional[Dict[str, Any]] = None
+
 
 
 # ─────────────────────────────────────────────
@@ -113,6 +123,35 @@ async def lifespan(app: FastAPI):
             model=settings.llm_model,
         )
         logger.info(f"✅ LLM client initialized: {settings.llm_model} @ {settings.llm_base_url}")
+
+        # Gateway smoke test — catches an invalid/rotated key BEFORE traffic
+        # hits a webhook. Result stored in module-level _llm_smoke_result and
+        # surfaced via /health.gemini.
+        global _llm_smoke_result
+        try:
+            _llm_smoke_result = await gemini_client.smoke_test()
+            if _llm_smoke_result["outcome"] == "ok":
+                logger.info(
+                    "✅ LLM gateway smoke test passed (%dms)",
+                    _llm_smoke_result["duration_ms"],
+                )
+            else:
+                logger.error(
+                    "⚠️ LLM gateway smoke test FAILED: outcome=%s detail=%s — "
+                    "/health will report degraded",
+                    _llm_smoke_result["outcome"],
+                    _llm_smoke_result["detail"],
+                )
+        except Exception as e:
+            # Defensive: smoke_test promises not to raise, but we don't want a
+            # bug here to take down the lifespan and prevent the service from
+            # serving /health.
+            logger.error("LLM smoke test exploded: %s", e, exc_info=True)
+            _llm_smoke_result = {
+                "outcome": "unknown_error",
+                "duration_ms": 0,
+                "detail": f"smoke_test raised: {type(e).__name__}",
+            }
     else:
         logger.warning("⚠️ LLM_API_KEY not set — AI analysis unavailable")
 
@@ -166,7 +205,18 @@ async def health_check():
     from database import get_last_gcs_sync
 
     db_ok = await check_database_health()
-    llm_ok = gemini_client is not None
+    # llm_ok is now driven by the startup smoke test outcome, not just whether
+    # gemini_client was constructed. A wrong/rotated key produces gemini=auth_error
+    # rather than the misleading gemini=configured the deployed code returns.
+    llm_outcome: str
+    if gemini_client is None:
+        llm_outcome = "not_configured"
+    elif _llm_smoke_result is None:
+        # Should not happen after lifespan completes, but be defensive.
+        llm_outcome = "unknown"
+    else:
+        llm_outcome = _llm_smoke_result["outcome"]
+    llm_ok = llm_outcome == "ok"
 
     # Populate last_gcs_sync snapshot (Theme 2.3 / task 8.2)
     gcs_sync = get_last_gcs_sync()
@@ -179,7 +229,7 @@ async def health_check():
     return HealthResponse(
         status="healthy" if is_healthy else "degraded",
         database="connected" if db_ok else "disconnected",
-        gemini="configured" if llm_ok else "not configured",
+        gemini=llm_outcome,
         llm_gateway=settings.llm_base_url,
         llm_model=settings.llm_model,
         openproject=settings.openproject_base_url,
@@ -565,10 +615,18 @@ async def _handle_bug_report(
     - Text-only: Do EVERYTHING inline (Phase 1 + ticket creation) and return result directly.
     - With media: Do Phase 1 inline, fire asyncio.Task for Phase 2 + ticket, return ack now.
     """
+    # ── Extract message/space context up front so registration & demo-space
+    # fallback logic can reference them safely. (Bug fix: previously
+    # space_name was used before assignment.)
+    message = event.get("message", {})
+    space_name = event.get("space", {}).get("name", "")
+    thread_name = message.get("thread", {}).get("name", "")
+    attachments = message.get("attachment", [])
+
     # Check if user is registered, otherwise fallback to space default
     user = await get_user_by_chat_id(sender_name)
     user_api_key = None
-    
+
     if user:
         user_api_key = user.openproject_api_key
     elif settings.default_openproject_api_key and settings.demo_space_id and settings.demo_space_id in space_name:
@@ -589,11 +647,6 @@ async def _handle_bug_report(
         return {
             "text": "❌ AI service is not configured. Please contact the administrator."
         }
-
-    message = event.get("message", {})
-    space_name = event.get("space", {}).get("name", "")
-    thread_name = message.get("thread", {}).get("name", "")
-    attachments = message.get("attachment", [])
     
     # ── Validate Bug Report Checkpoints ──
     
@@ -638,9 +691,34 @@ async def _handle_bug_report(
 
     start_time = time.time()
 
-    # ── Bucket Routing (Python — no LLM) ──
-    target_project_id, text_for_llm = extract_bucket_from_message(text)
-    logger.info(f"Bucket routing: project_id={target_project_id}, text_for_llm='{text_for_llm[:80]}'")
+    # ── Bucket Routing (Python — no LLM by default) ──
+    target_project_id, text_for_llm, routing_provenance = extract_bucket_with_provenance(text)
+    logger.info(
+        f"Bucket routing: project_id={target_project_id}, "
+        f"provenance={routing_provenance}, text_for_llm='{text_for_llm[:80]}'"
+    )
+
+    # If deterministic routing fell through to the Android default with no
+    # signal anywhere, fall back to a one-shot LLM bucket picker. This catches
+    # cases where QA mentions a project by a name we don't have an alias for
+    # (audit May 2026 — Model Product Library, Msite SOI, Export, etc.).
+    if routing_provenance == "default" and gemini_client is not None and len(text.strip()) >= 20:
+        from config import OP_PROJECTS as _OP_PROJECTS
+        try:
+            picked = await asyncio.wait_for(
+                gemini_client.pick_bucket(text, list(_OP_PROJECTS.keys()), timeout_s=6.0),
+                timeout=8.0,
+            )
+        except (asyncio.TimeoutError, Exception) as _e:
+            picked = None
+            logger.warning("LLM bucket picker fallback failed: %s", _e)
+        if picked and picked in _OP_PROJECTS:
+            target_project_id = _OP_PROJECTS[picked]
+            routing_provenance = "llm_fallback"
+            logger.info(
+                "Bucket routing: LLM picker → project %s (%d)",
+                picked, target_project_id,
+            )
 
     # ── Phase 1: Text analysis (always runs inline, ~5-10s) ──
     try:
@@ -696,9 +774,41 @@ async def _handle_bug_report(
                 logs_or_links=None
             )
         else:
-            return {
-                "text": f"❌ **Error analyzing your bug report**\n\n**Error:** {str(e)}\n\nPlease try again."
+            # Categorise the failure for the user. We never leak raw exception
+            # text — that's how SDK internals end up in chat. Map LLMGatewayError
+            # outcomes to friendly messages; everything else is the generic case.
+            from gemini_client import LLMGatewayError
+            if isinstance(e, LLMGatewayError):
+                outcome = e.outcome
+            else:
+                outcome = "unknown_error"
+            messages_by_outcome = {
+                "auth_error": (
+                    "❌ **AI service authentication failed.**\n\n"
+                    "The bot's API key has been rejected by the gateway. "
+                    "An operator has been alerted (look for `LLM_CALL outcome=auth_error` in /logs). "
+                    "Please retry in a few minutes."
+                ),
+                "rate_limit": (
+                    "⏳ **AI service is rate-limited.**\n\n"
+                    "Too many requests are queued. Please retry in 30-60 seconds."
+                ),
+                "server_error": (
+                    "🛠️ **AI service is temporarily unavailable.**\n\n"
+                    "The gateway returned a 5xx error. Please retry in a few minutes, "
+                    "or attach a screenshot/video so I can still raise a ticket."
+                ),
+                "network_error": (
+                    "🌐 **Could not reach AI service.**\n\n"
+                    "There was a network issue. Please retry shortly."
+                ),
+                "unknown_error": (
+                    "❌ **Could not analyze your bug report.**\n\n"
+                    "Please retry, or attach a screenshot/video so I can raise a ticket "
+                    "even if AI analysis is degraded."
+                ),
             }
+            return {"text": messages_by_outcome.get(outcome, messages_by_outcome["unknown_error"])}
 
     # ── Check if Phase 1 itself detected irrelevant/non-bug input ──
     is_rejected, rejection_reason = _is_rejection_report(initial_report)
