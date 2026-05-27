@@ -30,7 +30,7 @@ echo [preflight] step 2: env validator (placeholder — wired in task 7.4)
 echo [preflight] step 2: skipped (not yet implemented)
 
 echo [preflight] step 3: pytest -q
-C:\Users\Imart\AppData\Local\Programs\Python\Python311\python.exe -m pytest -q
+C:\Users\Imart\AppData\Local\Programs\Python\Python311\python.exe -m pytest tests/ -q
 if %errorlevel% neq 0 (
     echo [preflight] FAIL: pytest
     exit /b 1
