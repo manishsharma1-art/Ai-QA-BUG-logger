@@ -13,7 +13,7 @@ import httpx
 from models import ExtractedBugReport
 from config import (
     OP_TYPE_BUG_ID, OP_PRIORITIES, OP_PROJECTS,
-    OP_BUG_TYPES, OP_ENVIRONMENTS, get_settings,
+    OP_BUG_TYPES, OP_ENVIRONMENTS, OP_BUCKET_CATEGORIES, get_settings,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,6 +75,7 @@ class OpenProjectClient:
         self,
         bug_report: ExtractedBugReport,
         api_key: str,
+        project_id: int = 3,
     ) -> Dict[str, Any]:
         """
         Create a new work package (bug ticket) in OpenProject.
@@ -82,6 +83,7 @@ class OpenProjectClient:
         Args:
             bug_report: Structured bug report from AI analysis.
             api_key: User's OpenProject API key.
+            project_id: OpenProject project ID (determined by bucket_router).
 
         Returns:
             Dict with ticket ID, URL, and other details.
@@ -94,8 +96,8 @@ class OpenProjectClient:
         # Build steps to reproduce for customField4
         steps_md = self._format_steps(bug_report.steps_to_reproduce)
 
-        # Resolve project identifier
-        project_slug = OP_PROJECTS.get(bug_report.platform.value, "android")
+        # Use the project_id passed from bucket_router (already resolved)
+        # project_id comes as parameter, no need to look up from bug_report
 
         # Resolve priority ID
         priority_id = OP_PRIORITIES.get(bug_report.priority.value, 8)
@@ -119,12 +121,20 @@ class OpenProjectClient:
             },
             "_links": {
                 "type": {"href": f"/api/v3/types/{OP_TYPE_BUG_ID}"},
-                "project": {"href": f"/api/v3/projects/{project_slug}"},
+                "project": {"href": f"/api/v3/projects/{project_id}"},
                 "priority": {"href": f"/api/v3/priorities/{priority_id}"},
                 "customField6": {"href": f"/api/v3/custom_options/{bug_type_id}"},
                 "customField9": {"href": f"/api/v3/custom_options/{env_id}"},
             },
         }
+
+        # Category setting disabled for now — will be enabled after category mapping is validated
+        # bucket_categories = OP_BUCKET_CATEGORIES.get(bug_report.platform.value, {})
+        # if bucket_categories and hasattr(bug_report, 'category') and bug_report.category:
+        #     category_id = bucket_categories.get(bug_report.category)
+        #     if category_id:
+        #         payload["_links"]["category"] = {"href": f"/api/v3/categories/{category_id}"}
+        #         logger.info(f"Setting category: {bug_report.category} (ID: {category_id})")
 
         logger.info(f"Creating work package: {bug_report.title}")
         logger.debug(f"Payload: {payload}")
@@ -210,6 +220,9 @@ class OpenProjectClient:
         # Logs (if any)
         if bug.logs_or_links:
             sections.append(f"### **Logs**\n\n{bug.logs_or_links}")
+
+        # AI Signature — inside last section (no separator) for filterability
+        sections.append("🤖 *Created by Bug Logger*")
 
         return "\n\n".join(sections)
 

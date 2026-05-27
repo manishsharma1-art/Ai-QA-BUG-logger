@@ -22,237 +22,64 @@ logger = logging.getLogger(__name__)
 # System Prompt for Bug Analysis
 # ─────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are an expert QA Bug Report Analyst for IndiaMART mobile applications (Android and iOS).
-You have been trained on 611 real bug reports from the IndiaMART QA team.
-You MUST respond with valid JSON matching the schema defined below.
+SYSTEM_PROMPT = """You are an expert QA Bug Report Analyst for IndiaMART.
+You MUST respond with valid JSON matching the schema below. No markdown, no explanation.
 
-## YOUR TASK
-Analyze the provided input (text, screenshots, videos, voice notes) and extract a complete, well-formatted bug report following the exact patterns used by the IndiaMART QA team.
-
-## INPUT SOURCES
-- **Text description** from the QA tester
-- **Screenshots** — perform OCR and visual analysis to identify UI issues, error messages, device info
-- **Videos** — analyze video frames to understand the bug reproduction flow, detect device/OS from UI elements
-- **Voice notes** — transcribe and extract bug context
-
-## REQUIRED JSON OUTPUT SCHEMA
+## JSON SCHEMA
 {
-  "title": "string — Concise, actionable bug title",
-  "actual_behavior": "string — What actually happens (the bug behavior observed)",
-  "expected_behavior": "string — What should happen instead (the correct behavior)",
-  "steps_to_reproduce": ["string — Step 1", "string — Step 2", "..."],
-  "device": "string — Device model. Use 'Not specified' if unknown",
-  "operating_system": "string — OS and version. Use 'Not specified' if unknown",
-  "environment": "string — Must be exactly 'LIVE' or 'STAGE'",
-  "app_version": "string — App version if mentioned. Default 'Not specified'",
-  "bug_type": "string — Must be exactly one of: 'UI/UX', 'Functional/Logical', 'Network', 'Content', 'Process Correction', 'Transactional'",
-  "priority": "string — Must be exactly one of: 'High', 'Medium', 'Low'",
-  "platform": "string — Must be exactly 'Android' or 'iOS'",
-  "logs_or_links": "string or null — Any log links, Firebase Crashlytics URLs, etc."
+  "title": "string — Concise bug title (50-120 chars)",
+  "actual_behavior": "string — What actually happens",
+  "expected_behavior": "string — What should happen",
+  "steps_to_reproduce": ["Step 1", "Step 2", "..."],
+  "device": "string — Device model or 'Desktop' or 'Not specified'",
+  "operating_system": "string — OS version or 'Not specified'",
+  "environment": "string — 'LIVE' or 'STAGE'",
+  "app_version": "string — App version or 'Not specified'",
+  "bug_type": "string — 'UI/UX' or 'Functional/Logical' or 'Network' or 'Content'",
+  "priority": "string — 'High' or 'Medium' or 'Low'",
+  "logs_or_links": "string or null"
 }
 
-## TITLE PATTERNS (learned from 611 real bugs)
-Titles should be descriptive and follow these patterns:
-- "User is unable to [action] on [screen/feature]"
-- "Blank screen is shown when [action]"
-- "[Feature/Element] is not working/shown/clickable on [screen]"
-- "App is crashed when [action]"
-- "Getting [error/issue] when [action]"
-- "404 error is shown when [navigating/clicking]"
-- "[Element] CTA is not [clickable/shown/working] on [screen]"
-- Average title length: ~100 characters (range: 27-245)
-- Do NOT include device/OS in title unless explicitly mentioned in the report
+## TITLE
+- Pattern: "[Feature/Element] is not [working/shown/clickable] on [screen]"
+- Be concise and specific. Do NOT include device/OS in title.
 
-## ACTUAL BEHAVIOR
-- State exactly what goes wrong, matching the tester's description
-- Be direct: "App crashes when...", "Blank screen is shown...", "User is unable to..."
-- Include additional context like "Replicating Every Time" or "Replicating on both LMS desktop and App" if mentioned
+## STEPS TO REPRODUCE
+- Use the EXACT steps the tester described. Do not rephrase or add steps they didn't mention.
+- Start with "Login as [user_id]" if mentioned, or "Go to [page/URL]"
+- End with "Observe that [issue]"
+- Typically 3-7 steps
 
-## EXPECTED BEHAVIOR
-- State the correct behavior using "should" phrasing
-- Pattern: "[Feature] should [correct behavior]"
-- Keep concise and mirror the actual behavior description
+## BUG TYPE (83% are Functional/Logical)
+- **Functional/Logical** — Features not working, crashes, errors, blank screens, 404s, wrong behavior, CTA not clickable, data not loading
+- **UI/UX** — ONLY for visual/layout issues: alignment, overlapping, cropping, font size, spacing, wrong color
+- **Network** — API timeout, 500 errors, connectivity failures
+- **Content** — Wrong text, missing labels, typos in UI
 
-## STEPS TO REPRODUCE (typical: 3-9 steps, avg 7)
-- Start with "Login as [user_id]" or "Login as [user_type]"
-- Include specific account IDs when mentioned (e.g., "Login as 1002520031", "Login as 9292006108")
-- Include navigation: "Navigate to [screen]", "Open [page]"
-- Include actions: "Click on [CTA/button]", "Tap on [element]"
-- End with observation: "Observe that [issue]" or "Check [result]"
-- Include test server connection if mentioned: "Connect app to test server"
+## PRIORITY (IMPORTANT — 95% should be Medium)
+- **High** — ONLY for: app crashes, complete login failure, payment completely broken, entire feature unavailable (nothing loads at all), data loss
+- **Medium** — DEFAULT for most bugs: feature partially broken, specific flow not working, UI issues, wrong behavior in specific scenario, CTA not clickable, wrong data shown, element missing
+- **Low** — Minor cosmetic: slight misalignment, minor font issue, edge case affecting very few users
 
-## DEVICE NAMES (from real data)
-Common devices used by the QA team:
-- Android: iqoo z6, Realme 10 pro plus, IQOO Z9 5g, Motorola g32, Samsung S23, Samsung S23 Ultra, Samsung M21, Realme gt 2, Realme narzo 20 pro
-- iOS: Iphone 13, iPhone 13, iphone 16 pro, Iphone 17 pro max
-- Use the device name exactly as provided by the tester
-- "Desktop/Mobile" is also valid when testing webview features
-
-## OS FORMATS (from real data)
-- Android: "Android 15", "android 14", "Android 13", "Android 12", "Android 16"
-- iOS: "IOS 26.2", "ios 26", "IOS 18.7", "iOS 26.2"
-- Use the format provided by the tester; normalize to "Android XX" or "iOS XX.X"
+CRITICAL: When in doubt, ALWAYS use "Medium". Do NOT use "High" unless the app literally crashes or an entire critical feature is completely unavailable. A single CTA not working = Medium. A page not loading for one user = Medium. A button misaligned = Low.
 
 ## ENVIRONMENT
-- STAGE (99%+ of bugs are tested on Stage) — default if not explicitly stated
-- LIVE — only if explicitly mentioned as "live", "production", or "live environment"
+- Default: "STAGE"
+- Only use "LIVE" if tester explicitly says "live", "production", or "Live"
 
-## BUG TYPE CLASSIFICATION (distribution from 611 real bugs)
-- **Functional/Logical** (83%) — Most bugs: features not working, wrong behavior, crashes, errors, missing functionality, blank screens, 404 errors, API errors
-- **UI/UX** (15%) — Visual/layout issues: alignment problems, trimmed CTAs, missing icons, font issues, UI not updating in real time
-- **Network** (<1%) — API failures, timeout, connectivity issues, 500 errors
-- **Content** (<1%) — Wrong text, missing labels
-- **Process Correction** (<1%) — Workflow/process issues
-- **Transactional** (<1%) — Payment/order transaction failures
+## DEVICE/OS
+- Extract from tester's text exactly as written
+- If "Desktop" or "Windows" mentioned → device = "Desktop"
+- If no device mentioned → "Not specified"
 
-Key classification rules:
-- App crashes → Functional/Logical (NOT UI/UX)
-- Blank screen → Functional/Logical
-- 404 error → Functional/Logical
-- Button not clickable → Functional/Logical (unless it's purely visual)
-- CTA not shown → Functional/Logical
-- UI alignment issue → UI/UX
-- Element trimmed/cut off → UI/UX
-- Payment options not working → Functional/Logical (NOT Transactional, unless money/order is involved)
+## TERMINOLOGY
+BL=Buy Lead, LMS=Lead Manager, BMC=Buyer Message Centre, PDP=Product Detail Page, SOI=Sell on IndiaMART, FCP=Free Content Provider, CTA=Call To Action, OTP=One-Time Password, MCAT=Category, Msite=m.indiamart.com
 
-## PRIORITY CLASSIFICATION (from real data: 95% Medium, 5% High)
-- **High** — App crashes, login failures, complete feature unavailable (no data loading), payment broken, notifications not received, critical CTAs missing
-- **Medium** — Features partially broken, specific flow issues, UI problems, wrong behavior in specific scenarios, specific account issues
-- **Low** — Minor cosmetic issues, edge cases, non-critical improvements
-- When in doubt, use **Medium** (most common in production data)
-
-## PLATFORM DETECTION
-Device → Platform mapping:
-- iqoo, IQOO, Realme, realme, Samsung, samsung, Motorola, motorola, Moto, moto, Poco, poco, Redmi, redmi, Xiaomi, OnePlus, Vivo, Oppo, Nothing → **Android**
-- iPhone, iphone, Iphone, IPphone, iPad → **iOS**
-- "Desktop/Mobile" → infer from project context or QA brief
-- If the message mentions "Android" or "iOS" project explicitly, use that
-
-## INDIAMART-SPECIFIC TERMINOLOGY
-- BL = Buy Lead (a lead/inquiry from a buyer)
-- LMS = Lead Management System (messaging system between buyer and seller)
-- BMC = Buyer Message Centre
-- PDP = Product Detail Page
-- SOI = Sell on IndiaMART (seller onboarding journey)
-- CSL = Customer Service Log
-- GST = Goods and Services Tax (Indian tax ID verification)
-- NPS = Net Promoter Score (feedback popup)
-- MDC = Mini Dynamic Catalogue
-- CTA = Call To Action (any clickable button or link)
-- OTP = One-Time Password
-- VPN = Virtual Private Network
-- BizFeed = Business Feed (activity feed)
-- Webview = Web-based pages rendered inside the native app
-- XMPP = Messaging protocol (for real-time messages)
-- Tender = A type of Buy Lead
-- EMPFCP = Employee Free Content Provider (account type)
-- Blocker popup = A popup that blocks user from proceeding (e.g., GST verification)
-- Context menu = 3-dot menu in top-right corner
-- APK = Android Package (app file)
-- IPA = iOS App file
-- GLid = Global Lead ID (account identifier)
-- T1/S1 build = Test/Stage build version
-
-## REAL BUG EXAMPLES (from production data)
-
-### Example 1 — Functional/Logical, Medium, Android
-Input: "Blocker pop-up is not coming on the tender listing when a tender is consumed through gmail deeplinking. Device: IQOO Z9 5g, OS: Android 15"
-Output:
-{
-  "title": "Blocker pop-up is not coming on the tender listing when an tender is consumed through gmail deeplinking.",
-  "actual_behavior": "Blocker pop-up is not coming on the tender listing when an tender is consumed through gmail deeplinking.",
-  "expected_behavior": "Blocker pop-up should come on the tender listing when an tender is consumed through gmail deeplinking.",
-  "steps_to_reproduce": ["Login as 1204501254 whose gst is not verified and pan is not provided", "Navigate to tender mailer.", "Consume any tender.", "Observe that the blocker pop-up is not coming."],
-  "device": "IQOO Z9 5g",
-  "operating_system": "Android 15",
-  "environment": "STAGE",
-  "app_version": "Not specified",
-  "bug_type": "Functional/Logical",
-  "priority": "Medium",
-  "platform": "Android",
-  "logs_or_links": null
-}
-
-### Example 2 — UI/UX, Medium, iOS
-Input: "The UI alignment issue in the post-call popup on Buyer Pages. Device: Iphone 13, OS: IOS 26.2"
-Output:
-{
-  "title": "The UI alignment issue in the post-call popup on Buyer Pages.",
-  "actual_behavior": "On the Buyer pages, a UI issue is observed in the Post-Call popup displayed after a call is attempted or completed.",
-  "expected_behavior": "The Post-Call popup on Buyer pages should render correctly with proper alignment, spacing, and there should be no half-trimmed CTAs",
-  "steps_to_reproduce": ["Login from the Buyer", "Open the Buyer pages (Search, PDP, Company and Impcat)", "Initiate a call to a seller from the Buyer page.", "End the call and observe the Post-Call popup that appears on the screen.", "The post call pop up seems trimmed on the No CTA"],
-  "device": "Iphone 13",
-  "operating_system": "IOS 26.2",
-  "environment": "STAGE",
-  "app_version": "Not specified",
-  "bug_type": "UI/UX",
-  "priority": "Medium",
-  "platform": "iOS",
-  "logs_or_links": null
-}
-
-### Example 3 — Functional/Logical, High, Android (Crash)
-Input: "App crashes when clicking WhatsApp CTA on Edit Product screen"
-Output:
-{
-  "title": "App crashes when clicking WhatsApp CTA on Edit Product screen",
-  "actual_behavior": "App crashes when clicking WhatsApp CTA on Edit Product screen",
-  "expected_behavior": "When clicking WhatsApp CTA on Edit Product screen user should be able to share product on whatsapp.",
-  "steps_to_reproduce": ["Login as seller", "Navigate to My Products", "Open edit product page for any product", "Click on WhatsApp CTA", "Observe app crash"],
-  "device": "Not specified",
-  "operating_system": "Not specified",
-  "environment": "STAGE",
-  "app_version": "Not specified",
-  "bug_type": "Functional/Logical",
-  "priority": "High",
-  "platform": "Android",
-  "logs_or_links": null
-}
-
-### Example 4 — Functional/Logical, High, Android (Login)
-Input: "Auto fetch of OTP is not working on the login OTP screen."
-Output:
-{
-  "title": "Auto fetch of OTP is not working on the login OTP screen.",
-  "actual_behavior": "Auto fetch of OTP is not working on the login OTP screen.",
-  "expected_behavior": "OTP should be auto fetched on the login screen.",
-  "steps_to_reproduce": ["Login as user (9292006108)", "Click on next", "Lands on OTP screen", "Observe that OTP is not auto-fetched"],
-  "device": "Not specified",
-  "operating_system": "Not specified",
-  "environment": "STAGE",
-  "app_version": "Not specified",
-  "bug_type": "Functional/Logical",
-  "priority": "High",
-  "platform": "Android",
-  "logs_or_links": null
-}
-
-### Example 5 — Functional/Logical, Medium, iOS
-Input: "The Logout, Logout from All Devices, and Disable Account Options Not Clickable in Context Menu on Settings Webview. Device: Iphone 13, OS: IOS 26.2"
-Output:
-{
-  "title": "The Logout, Logout from All Devices, and Disable Account Options Not Clickable in Context Menu on Settings Webview.",
-  "actual_behavior": "The Logout, Logout from All Devices, and Disable Account Options are not clickable in the context menu on Settings Webview.",
-  "expected_behavior": "Each option should be fully clickable and responsive. Selecting any option should trigger the respective action.",
-  "steps_to_reproduce": ["Login from any seller/buyer account", "Navigate to Settings page in the app", "Open the context menu (3-dot menu)", "Try clicking on Logout, Logout from All Devices, or Disable Account", "Observe that none of the options respond to tap"],
-  "device": "Iphone 13",
-  "operating_system": "IOS 26.2",
-  "environment": "STAGE",
-  "app_version": "Not specified",
-  "bug_type": "Functional/Logical",
-  "priority": "High",
-  "platform": "iOS",
-  "logs_or_links": null
-}
-
-## CRITICAL RULES
-- Respond ONLY with valid JSON — no markdown, no code fences, no explanation.
-- All string values in the JSON must be properly escaped.
-- Follow the schema exactly. Do not add extra fields.
-- Match the writing style and tone of the real IndiaMART QA team examples above.
-- When information is missing, use "Not specified" — do NOT invent device names or OS versions.
-- Default environment to "STAGE" unless explicitly stated otherwise.
-- Default priority to "Medium" unless clear indicators for High (crash, login, payment, data loss) or Low (minor cosmetic).
+## RULES
+- Respond ONLY with valid JSON
+- Do NOT invent information. Use "Not specified" for unknown fields.
+- PRESERVE the tester's exact wording for actual/expected behavior
+- Priority MUST be "Medium" unless crash/complete failure (High) or pure cosmetic (Low)
 """
 
 
@@ -292,10 +119,14 @@ class GeminiClient:
             logger.info("═" * 40)
             logger.info(f"PHASE 2: Enriching with {len(media_items)} media items...")
             try:
-                enriched_report = await self.enrich_with_media(text, initial_report, media_items)
-                logger.info(f"PHASE 2 COMPLETE: {enriched_report.title}")
+                enriched_result = await self.enrich_with_media(text, initial_report, media_items)
+                if isinstance(enriched_result, dict) and not enriched_result.get("is_valid", True):
+                    logger.info("PHASE 2 COMPLETE: Media rejected by inline screening")
+                    logger.info("═" * 40)
+                    return enriched_result
+                logger.info(f"PHASE 2 COMPLETE: {enriched_result.title}")
                 logger.info("═" * 40)
-                return enriched_report
+                return enriched_result
             except Exception as e:
                 logger.error(f"PHASE 2 FAILED, using Phase 1 result: {e}")
                 return initial_report
@@ -305,22 +136,17 @@ class GeminiClient:
     async def analyze_text_brief(self, text: str) -> ExtractedBugReport:
         """
         Phase 1: Fast text-only analysis of the QA brief.
-        Completes in ~5-10 seconds with no media processing.
+        Single attempt, no retries (must complete within 25s webhook deadline).
+        Typical response: 3-5 seconds.
         """
-        content_parts = [
-            {"type": "text", "text": (
-                "Analyze the following bug report TEXT and extract structured bug data as JSON.\n\n"
-                f"QA Tester's Report:\n{text}"
-            )}
-        ]
+        import asyncio
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": content_parts},
+            {"role": "user", "content": f"Analyze the following bug report and extract structured bug data as JSON.\n\nQA Tester's Report:\n{text}"},
         ]
 
         try:
-            import asyncio
             loop = asyncio.get_event_loop()
 
             response = await asyncio.wait_for(
@@ -331,11 +157,11 @@ class GeminiClient:
                         messages=messages,
                         response_format={"type": "json_object"},
                         temperature=0.2,
-                        max_tokens=2000,
-                        timeout=30.0,
+                        max_tokens=1000,
+                        timeout=20.0,
                     ),
                 ),
-                timeout=45.0,
+                timeout=22.0,
             )
 
             response_text = response.choices[0].message.content
@@ -346,13 +172,13 @@ class GeminiClient:
             return ExtractedBugReport(**result_json)
 
         except asyncio.TimeoutError:
-            logger.error("Phase 1 text analysis timed out after 45s")
+            logger.error("Phase 1 timed out after 22s")
             raise TimeoutError("Text analysis timed out. Please try again.")
         except json.JSONDecodeError as e:
             logger.error(f"Phase 1 JSON parse failed: {e}")
-            raise ValueError(f"AI returned invalid JSON: {e}")
+            raise ValueError(f"AI returned invalid response: {e}")
         except Exception as e:
-            logger.error(f"Phase 1 analysis failed: {e}")
+            logger.error(f"Phase 1 failed: {e}")
             raise
 
     async def enrich_with_media(
@@ -375,16 +201,63 @@ class GeminiClient:
         # Provide Phase 1 context so LLM knows what to look for
         initial_json = initial_report.model_dump_json(indent=2)
         context_prompt = (
-            "You previously analyzed a bug report text and produced this initial analysis:\n"
+            "CONTENT SCREENING (quick check):\n"
+            "If ALL attached images are natural photographs (people, animals, outdoor, food) with NO software UI visible → respond: {\"is_valid\": false, \"reason\": \"Not a software screenshot\"}\n"
+            "Otherwise, proceed with bug analysis below.\n\n"
+            
+            "You are analyzing screenshots/video frames of a software bug. Respond with valid JSON.\n\n"
+            
+            "INITIAL TEXT ANALYSIS (from QA tester's brief):\n"
             f"```json\n{initial_json}\n```\n\n"
-            f"Original QA Brief:\n{text}\n\n"
-            "Now analyze the attached media (video frames / screenshots) to:\n"
-            "1. Watch frames SEQUENTIALLY — they show the bug reproduction steps in order\n"
-            "2. VERIFY and CORRECT the initial analysis based on visual evidence\n"
-            "3. EXTRACT device model, OS version, app version from status bars or UI\n"
-            "4. IMPROVE steps_to_reproduce with specific details visible in the frames\n"
-            "5. UPDATE title and descriptions if the media reveals more specific details\n\n"
-            "Respond with the COMPLETE updated bug report JSON following the exact same schema.\n"
+            f"QA TESTER'S ORIGINAL BRIEF:\n{text}\n\n"
+            
+            "YOUR TASK — Extract accurate bug data from the MEDIA:\n\n"
+            
+            "## FOR VIDEO FRAMES (sequential screenshots from screen recording):\n"
+            "The frames are in CHRONOLOGICAL ORDER. Each frame is a moment in the bug reproduction.\n"
+            "1. FRAME 1: Identify the STARTING screen. Read the page title, navigation state, any visible text.\n"
+            "2. FRAME 2-N: For each subsequent frame, identify WHAT CHANGED from the previous frame.\n"
+            "   - Did user tap a button? Which one? (read the button text)\n"
+            "   - Did a new screen load? What screen?\n"
+            "   - Did an error appear? What error text?\n"
+            "   - Did a popup/dialog open? What does it say?\n"
+            "3. FINAL FRAMES: Identify the BUG STATE — what's wrong in the last frame(s).\n"
+            "4. Convert frame transitions into steps_to_reproduce. Each visible action = one step.\n"
+            "   ONLY describe actions you can ACTUALLY SEE in frame transitions. Do NOT invent steps.\n\n"
+            
+            "## FOR SCREENSHOTS (1-3 static images):\n"
+            "1. READ all visible text in the image (OCR): page titles, button labels, error messages, URLs in address bar.\n"
+            "2. IDENTIFY the screen/page name from header or navigation.\n"
+            "3. IDENTIFY what's wrong (the bug) — what looks broken, misaligned, missing, or incorrect.\n"
+            "4. If multiple screenshots: describe the flow from image 1 → 2 → 3.\n"
+            "5. For desktop screenshots: READ THE URL from the browser address bar.\n\n"
+            
+            "## DEVICE/OS EXTRACTION:\n"
+            "- Mobile: Check the STATUS BAR (top of screen) for time format, icons, signal bars.\n"
+            "- Look for device model in Settings screenshots or About screen.\n"
+            "- If tester mentioned device/OS in their text, use that.\n\n"
+            
+            "## OUTPUT JSON (include is_valid: true):\n"
+            "{\n"
+            '  "is_valid": true,\n'
+            '  "title": "Concise bug title based on what you see",\n'
+            '  "actual_behavior": "What you observe is wrong in the media",\n'
+            '  "expected_behavior": "What should happen instead",\n'
+            '  "steps_to_reproduce": ["Step 1 from frame analysis", "Step 2", ...],\n'
+            '  "device": "From text or status bar or Not specified",\n'
+            '  "operating_system": "From text or UI or Not specified",\n'
+            '  "environment": "STAGE or LIVE",\n'
+            '  "app_version": "If visible in UI or Not specified",\n'
+            '  "bug_type": "UI/UX or Functional/Logical",\n'
+            '  "priority": "Medium (default) or High (only if crash/complete failure)",\n'
+            '  "logs_or_links": "Any URLs visible in screenshots or null"\n'
+            "}\n\n"
+            
+            "CRITICAL RULES:\n"
+            "- steps_to_reproduce must come from what you SEE in frames. Do NOT invent navigation steps.\n"
+            "- If you can only see 2 screens, return only 2-3 steps. Do NOT pad with assumed steps.\n"
+            "- Use EXACT text visible in UI elements (button names, menu items, error messages).\n"
+            "- Priority: Medium unless you see a crash dialog or blank/error screen.\n"
         )
         content_parts.append({"type": "text", "text": context_prompt})
 
@@ -445,29 +318,47 @@ class GeminiClient:
 
         try:
             import asyncio
+            from openai import AuthenticationError, APIConnectionError
             loop = asyncio.get_event_loop()
 
-            # Extended timeout: 120 frames can take time for LLM to analyze
-            response = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: self.client.chat.completions.create(
-                        model=self.model,
-                        messages=messages,
-                        response_format={"type": "json_object"},
-                        temperature=0.2,
-                        max_tokens=2000,
-                        timeout=180.0,  # 3 min client timeout for video
-                    ),
-                ),
-                timeout=210.0  # 3.5 min overall timeout
-            )
+            # Retry logic for transient gateway auth errors
+            max_retries = 2
+            for attempt in range(1, max_retries + 1):
+                try:
+                    # Extended timeout: frames can take time for LLM to analyze
+                    response = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None,
+                            lambda: self.client.chat.completions.create(
+                                model=self.model,
+                                messages=messages,
+                                response_format={"type": "json_object"},
+                                temperature=0.2,
+                                max_tokens=2000,
+                                timeout=180.0,  # 3 min client timeout for video
+                            ),
+                        ),
+                        timeout=210.0  # 3.5 min overall timeout
+                    )
+                    break  # Success — exit retry loop
+                except (AuthenticationError, APIConnectionError) as e:
+                    logger.warning(f"Phase 2 transient LLM error (attempt {attempt}/{max_retries}): {e}")
+                    if attempt < max_retries:
+                        await asyncio.sleep(3)
+                        continue
+                    else:
+                        raise
 
             response_text = response.choices[0].message.content
             logger.info(f"Phase 2 LLM response: {response_text[:500]}")
 
             cleaned = self._clean_json_response(response_text)
             result_json = json.loads(cleaned)
+            
+            # Check if media was rejected by inline screening
+            if "is_valid" in result_json and not result_json["is_valid"]:
+                return result_json  # Return dictionary to be processed by caller as rejection
+                
             return ExtractedBugReport(**result_json)
 
         except asyncio.TimeoutError:
@@ -475,18 +366,66 @@ class GeminiClient:
             raise TimeoutError("Video analysis timed out. Falling back to text analysis.")
         except json.JSONDecodeError as e:
             logger.error(f"Phase 2 JSON parse failed: {e}")
+            # Safety net: if JSON is broken but the AI was clearly trying to reject,
+            # extract the rejection gracefully instead of crashing
+            try:
+                raw = response_text
+            except NameError:
+                raw = ""
+            if raw and "is_valid" in raw.lower() and "false" in raw.lower():
+                logger.info("Detected rejection intent in malformed JSON — extracting reason")
+                import re
+                reason_match = re.search(r'"reason"\s*:\s*"([^"]+)"', raw)
+                reason = reason_match.group(1) if reason_match else "The attached image does not appear to be an app screenshot or bug recording."
+                return {"is_valid": False, "reason": reason}
             raise ValueError(f"AI returned invalid JSON from media analysis: {e}")
         except Exception as e:
             logger.error(f"Phase 2 media analysis failed: {e}")
             raise
 
     def _clean_json_response(self, response_text: str) -> str:
-        """Clean LLM response to extract valid JSON (strip markdown fences, etc.)."""
+        """Clean LLM response to extract valid JSON (strip markdown fences, repair truncation)."""
         cleaned = response_text.strip()
         if cleaned.startswith("```"):
             lines = cleaned.split("\n")
             lines = [l for l in lines if not l.strip().startswith("```")]
             cleaned = "\n".join(lines)
+        
+        # Attempt to repair truncated JSON (common issue with LLM gateway)
+        cleaned = cleaned.strip()
+        if cleaned and not cleaned.endswith("}"):
+            # JSON was truncated — try to close it
+            # Count open braces/brackets
+            open_braces = cleaned.count("{") - cleaned.count("}")
+            open_brackets = cleaned.count("[") - cleaned.count("]")
+            
+            # If we're inside a string (unterminated), close it
+            # Find last quote state
+            in_string = False
+            escape_next = False
+            for ch in cleaned:
+                if escape_next:
+                    escape_next = False
+                    continue
+                if ch == '\\':
+                    escape_next = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+            
+            if in_string:
+                cleaned += '"'  # Close the unterminated string
+            
+            # Close any open arrays
+            for _ in range(open_brackets):
+                cleaned += "]"
+            
+            # Close any open objects
+            for _ in range(open_braces):
+                cleaned += "}"
+            
+            logger.warning(f"JSON repair applied: closed {open_braces} braces, {open_brackets} brackets, in_string={in_string}")
+        
         return cleaned
 
     def _extract_video_frames(
@@ -527,16 +466,14 @@ class GeminiClient:
                     logger.warning("Video has 0 frames or unknown FPS, skipping extraction")
                     return frames
 
-                # Extract 1 frame per second, max 30 frames
-                # 30 frames is enough for LLM to see every step of a bug reproduction
-                # More than ~30 images causes LLM gateway payload issues
+                # Extract max 20 frames (as a robust compromise to prevent missing crucial moments while saving time)
                 duration_sec = total_frames / fps
-                num_frames = min(int(duration_sec), 30)
+                num_frames = min(int(duration_sec), 20)
                 num_frames = max(num_frames, 1)  # At least 1 frame
 
                 logger.info(
                     f"Video: {duration_sec:.1f}s @ {fps:.0f}fps, "
-                    f"extracting {num_frames} frames (1fps, max 30)"
+                    f"extracting {num_frames} frames (max 20 optimized limit)"
                 )
 
                 # Extract evenly spaced frames

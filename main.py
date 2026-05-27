@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from config import get_settings
+from bucket_router import extract_bucket_from_message
 from database import (
     init_database, close_database, check_database_health,
     get_user_by_chat_id, create_or_update_user,
@@ -29,10 +30,11 @@ from openproject_client import OpenProjectClient
 from google_auth import GoogleChatClient
 from models import (
     UserRegistrationRequest, UserRegistrationResponse,
-    HealthResponse,
+    HealthResponse, ExtractedBugReport
 )
 
 import collections
+from pydantic import ValidationError
 
 # ─────────────────────────────────────────────
 # Logging Setup
@@ -246,9 +248,8 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         # space is inside messagePayload (confirmed from real payload)
         space_obj = msg_payload.get("space") or msg_obj.get("space") or {}
         space_name = space_obj.get("name", "")
+        space_type = space_obj.get("type", "")
         thread_name = (msg_obj.get("thread") or {}).get("name", "")
-
-        logger.info(f"[Add-on] event={addon_event_type} from {display_name} ({sender_name}): {text[:100]}")
 
         def _addon_response(resp: dict) -> dict:
             return {
@@ -260,6 +261,8 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                     }
                 }
             }
+
+        logger.info(f"[Add-on] event={addon_event_type} from {display_name} ({sender_name}): {text[:100]}")
 
         welcome_text = (
             "\U0001f44b **Hi! I'm the AI Bug Logger Bot.**\n\n"
@@ -332,6 +335,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     sender_name = sender.get("name", "")         # e.g. "users/123456789"
     display_name = sender.get("displayName", "User")
     message_name = message.get("name", "")
+    
+    space = event.get("space", {})
+    space_type = space.get("type", "")
 
     # Get message text (strip bot mentions)
     text = (message.get("text") or "").strip()
@@ -483,6 +489,43 @@ async def _handle_status(sender_name: str, display_name: str) -> Dict[str, str]:
 
 
 # ─────────────────────────────────────────────
+# Content-based Rejection Detection
+# ─────────────────────────────────────────────
+
+# Phrases that indicate the AI recognized the input as NOT a valid bug report,
+# even though it returned a full ExtractedBugReport instead of {"is_valid": false}.
+_REJECTION_PHRASES = [
+    "irrelevant input", "no bug report", "not a bug", "not a valid bug",
+    "not a software", "not an app", "no bug found", "no issue found",
+    "does not contain", "do not contain", "outdoor scene", "not related to",
+    "not a screenshot", "not an app screenshot", "natural photograph",
+    "camera photo", "real-world", "no actionable bug", "cannot identify a bug",
+    "no software bug", "not related to any software", "unrelated to",
+    "not a product screenshot", "random object", "not a screen recording",
+]
+
+def _is_rejection_report(report) -> tuple:
+    """
+    Check if an ExtractedBugReport's content actually indicates the AI
+    is rejecting the input (not a real bug), even though it returned
+    a full report structure instead of {"is_valid": false}.
+    
+    Returns (is_rejected: bool, reason: str)
+    """
+    fields_to_check = [
+        getattr(report, 'title', ''),
+        getattr(report, 'actual_behavior', ''),
+    ]
+    for field in fields_to_check:
+        field_lower = field.lower() if field else ''
+        for phrase in _REJECTION_PHRASES:
+            if phrase in field_lower:
+                logger.info(f"Rejection detected in report field: '{phrase}' found in '{field[:100]}'")
+                return True, field
+    return False, ""
+
+
+# ─────────────────────────────────────────────
 # Bug Report Processing
 # ─────────────────────────────────────────────
 
@@ -573,28 +616,93 @@ async def _handle_bug_report(
 
     start_time = time.time()
 
+    # ── Bucket Routing (Python — no LLM) ──
+    target_project_id, cleaned_text = extract_bucket_from_message(text)
+    logger.info(f"Bucket routing: project_id={target_project_id}, cleaned_text='{cleaned_text[:80]}'")
+
     # ── Phase 1: Text analysis (always runs inline, ~5-10s) ──
     try:
         logger.info(f"Phase 1 INLINE: Analyzing text from {display_name}...")
         initial_report = await asyncio.wait_for(
-            gemini_client.analyze_text_brief(text),
+            gemini_client.analyze_text_brief(cleaned_text),
             timeout=25.0  # Must fit within webhook response window
         )
         elapsed_p1 = round(time.time() - start_time, 1)
         logger.info(f"✅ Phase 1 complete in {elapsed_p1}s: {initial_report.title}")
+    except ValidationError as ve:
+        logger.error(f"Phase 1 Pydantic validation failed: {ve}", exc_info=True)
+        if attachments:
+            logger.info("Phase 1 validation failed, but media is present. Using QA text as fallback.")
+            initial_report = ExtractedBugReport(
+                title=cleaned_text[:120] if len(cleaned_text) > 20 else "Bug reported with media attachment",
+                actual_behavior=cleaned_text,
+                expected_behavior="Expected behavior not specified. See attached media.",
+                steps_to_reproduce=["See attached media for reproduction steps"],
+                device="Not specified",
+                operating_system="Not specified",
+                environment="STAGE",
+                app_version="Not specified",
+                bug_type="Functional/Logical",
+                priority="Medium",
+                platform="Android",
+                logs_or_links=None
+            )
+        else:
+            return {
+                "text": (
+                    "❌ **AI Analysis Validation Error**\n\n"
+                    "The AI could not properly map the bug fields (like priority or platform) for your description.\n\n"
+                    "**Tip:** Try describing the issue with clearer details, or attach a screenshot/video of the bug!"
+                )
+            }
     except Exception as e:
         logger.error(f"Phase 1 failed: {e}", exc_info=True)
+        if attachments:
+            logger.info("Phase 1 failed, but media is present. Using QA text as fallback.")
+            initial_report = ExtractedBugReport(
+                title=cleaned_text[:120] if len(cleaned_text) > 20 else "Bug reported with media attachment",
+                actual_behavior=cleaned_text,
+                expected_behavior="Expected behavior not specified. See attached media.",
+                steps_to_reproduce=["See attached media for reproduction steps"],
+                device="Not specified",
+                operating_system="Not specified",
+                environment="STAGE",
+                app_version="Not specified",
+                bug_type="Functional/Logical",
+                priority="Medium",
+                platform="Android",
+                logs_or_links=None
+            )
+        else:
+            return {
+                "text": f"❌ **Error analyzing your bug report**\n\n**Error:** {str(e)}\n\nPlease try again."
+            }
+
+    # ── Check if Phase 1 itself detected irrelevant/non-bug input ──
+    is_rejected, rejection_reason = _is_rejection_report(initial_report)
+    if is_rejected and not attachments:
+        # Text-only and the AI says it's not a bug — reject immediately
+        logger.info(f"Phase 1 rejection detected (text-only): {rejection_reason[:100]}")
         return {
-            "text": f"❌ **Error analyzing your bug report**\n\n**Error:** {str(e)}\n\nPlease try again."
+            "text": (
+                "⚠️ **Not a valid bug report**\n\n"
+                "Your message does not appear to describe a software bug.\n\n"
+                "**To report a bug, please include:**\n"
+                "• A description of what went wrong in the app\n"
+                "• Steps to reproduce the issue\n"
+                "• Device and OS details (if applicable)\n\n"
+                "_Example: 'Login screen crashes after entering OTP. Device: Samsung S23, OS: Android 15'_"
+            )
         }
 
     # ── If NO media: create ticket right now and return the result ──
     if not attachments:
         try:
             logger.info("No media — creating ticket synchronously...")
-            ticket = await op_client.create_work_package(initial_report, user_api_key)
+            ticket = await op_client.create_work_package(initial_report, user_api_key, project_id=target_project_id)
             elapsed = round(time.time() - start_time, 1)
             logger.info(f"✅ Ticket #{ticket['ticket_id']} created in {elapsed}s (text-only)")
+            
             return {
                 "text": (
                     f"✅ **Bug created successfully!**\n\n"
@@ -618,10 +726,11 @@ async def _handle_bug_report(
     logger.info(f"Media detected ({len(attachments)} attachments) — launching async task for Phase 2")
     task = asyncio.create_task(
         _process_media_and_create_ticket(
-            text=text,
+            text=cleaned_text,
             initial_report=initial_report,
             attachments=attachments,
             user_api_key=user_api_key,
+            project_id=target_project_id,
             space_name=space_name,
             thread_name=thread_name,
             display_name=display_name,
@@ -648,6 +757,7 @@ async def _process_media_and_create_ticket(
     initial_report,
     attachments: List[Dict],
     user_api_key: str,
+    project_id: int,
     space_name: str,
     thread_name: str,
     display_name: str,
@@ -657,41 +767,55 @@ async def _process_media_and_create_ticket(
     Async task: Download media, run Phase 2 enrichment, create ticket, notify user.
     Runs AFTER webhook has already responded with Phase 1 results.
     """
-    MAX_ATTACHMENT_SIZE = 20 * 1024 * 1024
+    MAX_ATTACHMENT_SIZE = 100 * 1024 * 1024  # Increased to 100MB to support videos
 
     try:
         # ── Download media ──
         media_items = []
         if attachments and chat_client and chat_client.is_available():
-            for att in attachments:
+            logger.info(f"Found {len(attachments)} attachments in the payload.")
+            for idx, att in enumerate(attachments):
                 content_type = att.get("contentType", "")
-                logger.info(f"Downloading attachment: {content_type}")
+                logger.info(f"Downloading attachment {idx + 1}/{len(attachments)}: {content_type}")
                 try:
                     data = await chat_client.download_attachment(att)
                     if data:
                         if len(data) > MAX_ATTACHMENT_SIZE:
-                            logger.warning(f"Attachment too large ({len(data)} bytes), skipping")
+                            logger.warning(f"Attachment {idx + 1} too large ({len(data)/1024/1024:.1f} MB), skipping")
                             continue
-                        file_name = att.get("contentName", f"attachment_{int(time.time())}.{content_type.split('/')[-1] if '/' in content_type else 'bin'}")
-                        media_items.append({"data": data, "mime_type": content_type, "name": file_name})
-                        logger.info(f"Downloaded: {content_type}, {len(data)} bytes")
-                    else:
-                        logger.warning(f"Failed to download attachment: {content_type}")
-                except Exception as dl_err:
-                    logger.error(f"Attachment download error: {dl_err}")
-        else:
-            logger.warning("Chat API not available for attachment download")
+                        
+                        # Ensure filename is unique even if contentName is missing or duplicate
+                        fallback_name = f"attachment_{int(time.time())}_{idx}.{content_type.split('/')[-1] if '/' in content_type else 'bin'}"
+                        file_name = att.get("contentName") or fallback_name
+                        
+                        # Add an index prefix if the name already exists in the list to prevent OpenProject collisions
+                        existing_names = [m["name"] for m in media_items]
+                        if file_name in existing_names:
+                            file_name = f"{idx}_{file_name}"
 
-        # ── AI Content Screening Gate ──
-        if media_items and gemini_client:
+                        media_items.append({"data": data, "mime_type": content_type, "name": file_name})
+                        logger.info(f"Downloaded {idx + 1}: {content_type}, {len(data)} bytes, name: {file_name}")
+                    else:
+                        logger.warning(f"Failed to download attachment {idx + 1}: {content_type}")
+                except Exception as dl_err:
+                    logger.error(f"Attachment {idx + 1} download error: {dl_err}")
+        else:
+            logger.warning("Chat API not available or no attachments present")
+
+        # ── Phase 2: Enrich with media & screening ──
+        bug_report = initial_report  # fallback
+        if media_items:
             try:
-                screening = await asyncio.wait_for(
-                    gemini_client.screen_media_content(media_items),
-                    timeout=25.0,
+                logger.info(f"Phase 2: Enriching with {len(media_items)} media items...")
+                enrichment_result = await asyncio.wait_for(
+                    gemini_client.enrich_with_media(text, initial_report, media_items),
+                    timeout=180.0  # 3 minutes max
                 )
-                if not screening.get("is_valid", True):
-                    reason = screening.get("reason", "The image does not appear to be an app screenshot.")
-                    logger.info(f"Content screening REJECTED: {reason}")
+
+                # Check if it was rejected during inline screening
+                if isinstance(enrichment_result, dict) and not enrichment_result.get("is_valid", True):
+                    reason = enrichment_result.get("reason", "The image does not appear to be an app screenshot.")
+                    logger.info(f"Content screening REJECTED in Phase 2: {reason}")
                     reject_msg = (
                         f"❌ **Media Rejected: Not a valid bug screenshot/recording**\n\n"
                         f"**Reason:** {reason}\n\n"
@@ -709,29 +833,85 @@ async def _process_media_and_create_ticket(
                             timeout=10.0,
                         )
                     return  # Stop processing — do NOT create a ticket
-                else:
-                    logger.info(f"Content screening PASSED: {screening.get('reason', 'OK')}")
-            except Exception as screen_err:
-                logger.error(f"Content screening error: {screen_err}. Allowing through.")
 
-        # ── Phase 2: Enrich with media ──
-        bug_report = initial_report  # fallback
-        if media_items:
-            try:
-                logger.info(f"Phase 2: Enriching with {len(media_items)} media items...")
-                bug_report = await asyncio.wait_for(
-                    gemini_client.enrich_with_media(text, initial_report, media_items),
-                    timeout=180.0  # 3 minutes max
-                )
+                bug_report = enrichment_result
                 elapsed_p2 = round(time.time() - start_time, 1)
                 logger.info(f"✅ Phase 2 complete in {elapsed_p2}s: {bug_report.title}")
+
+                # Check if Phase 2 embedded rejection text inside the bug report fields
+                is_rejected, rejection_reason = _is_rejection_report(bug_report)
+                if is_rejected:
+                    logger.info(f"Phase 2 content-based rejection detected: {rejection_reason[:100]}")
+                    reject_msg = (
+                        f"❌ **Media Rejected: Not a valid bug screenshot/recording**\n\n"
+                        f"**Reason:** {rejection_reason[:300]}\n\n"
+                        f"Please send only:\n"
+                        f"• App screenshots showing the bug\n"
+                        f"• Screen recordings of the bug reproduction\n"
+                        f"• Console logs or error messages\n\n"
+                        f"_Photos of people, outdoor scenes, or non-product images cannot be used for bug reports._"
+                    )
+                    if chat_client and chat_client.is_available():
+                        await asyncio.wait_for(
+                            chat_client.send_message(
+                                space_name=space_name, text=reject_msg, thread_name=thread_name,
+                            ),
+                            timeout=10.0,
+                        )
+                    return  # Stop processing — do NOT create a ticket
+
             except Exception as p2_err:
                 logger.error(f"Phase 2 failed ({p2_err}), using Phase 1 result")
                 bug_report = initial_report
 
+        # ── Final safety check: ensure the report is genuinely a bug before creating ticket ──
+        final_rejected, final_reason = _is_rejection_report(bug_report)
+        if final_rejected:
+            logger.info(f"Final rejection safety check caught non-bug report: {final_reason[:100]}")
+            reject_msg = (
+                f"❌ **Not a valid bug report**\n\n"
+                f"**Reason:** {final_reason[:300]}\n\n"
+                f"Please send only:\n"
+                f"• App screenshots showing actual software bugs\n"
+                f"• Screen recordings of bug reproduction steps\n"
+                f"• A text description of the software issue\n\n"
+                f"_Photos of real-world objects, outdoor scenes, or irrelevant text cannot be used for bug reports._"
+            )
+            if chat_client and chat_client.is_available():
+                await asyncio.wait_for(
+                    chat_client.send_message(
+                        space_name=space_name, text=reject_msg, thread_name=thread_name,
+                    ),
+                    timeout=10.0,
+                )
+            return  # Stop — do NOT create a ticket
+
+        # ── Placeholder guard: Don't create ticket if both phases produced no useful content ──
+        _PLACEHOLDER_TITLES = [
+            "Bug reported — details pending media analysis",
+            "Bug reported via media",
+            "Bug reported with media attachment",
+        ]
+        if bug_report.title in _PLACEHOLDER_TITLES:
+            logger.warning(f"Both Phase 1 and Phase 2 failed — placeholder report detected, NOT creating ticket")
+            fail_msg = (
+                "❌ **Could not process your bug report**\n\n"
+                "The AI was unable to analyze your text and media. This can happen when:\n"
+                "• The server is temporarily overloaded\n\n"
+                "**Please try again.** If the issue persists, try without video attachment."
+            )
+            if chat_client and chat_client.is_available():
+                await asyncio.wait_for(
+                    chat_client.send_message(
+                        space_name=space_name, text=fail_msg, thread_name=thread_name,
+                    ),
+                    timeout=10.0,
+                )
+            return  # Stop — do NOT create garbage ticket
+
         # ── Create ticket ──
         logger.info("Creating OpenProject ticket...")
-        ticket = await op_client.create_work_package(bug_report, user_api_key)
+        ticket = await op_client.create_work_package(bug_report, user_api_key, project_id=project_id)
         elapsed = round(time.time() - start_time, 1)
         logger.info(f"✅ Ticket #{ticket['ticket_id']} created in {elapsed}s")
 

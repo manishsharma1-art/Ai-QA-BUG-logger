@@ -5,3 +5,17 @@ venv
 __pycache__
 *.pyc
 .env
+gcloud_sdk/
+gcloud.zip
+deploy_package.zip
+qa_bugbot_stable_checkpoint.zip
+references/
+scripts/
+assets/
+*.db
+bug_analysis_full.txt
+bug_analysis_output.txt
+*.md
+test_*.py
+analyze_bugs.py
+extract_training.py

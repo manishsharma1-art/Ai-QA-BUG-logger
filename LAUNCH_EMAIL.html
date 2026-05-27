@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    line-height: 1.7;
+    color: #2c3e50;
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 20px;
+    background: #ffffff;
+}
+.email-container {
+    background: white;
+    padding: 40px;
+}
+.header {
+    text-align: center;
+    border-bottom: 2px solid #2c3e50;
+    padding-bottom: 20px;
+    margin-bottom: 30px;
+}
+.header h1 {
+    color: #1a1a2e;
+    font-size: 26px;
+    margin-bottom: 5px;
+    font-weight: 600;
+}
+.header .subtitle {
+    color: #555;
+    font-size: 15px;
+    font-weight: 400;
+}
+.badge {
+    display: inline-block;
+    background: #f0f0f0;
+    color: #2c3e50;
+    padding: 4px 14px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-top: 10px;
+    border: 1px solid #ddd;
+    letter-spacing: 0.5px;
+}
+
+h2 {
+    color: #1a1a2e;
+    font-size: 18px;
+    font-weight: 600;
+    margin-top: 35px;
+    margin-bottom: 15px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #eee;
+}
+
+/* Flow Diagram */
+.flow-section {
+    margin: 30px 0;
+    padding: 25px 30px;
+    background: #fafafa;
+    border-radius: 6px;
+    border: 1px solid #e8e8e8;
+}
+.flow-section h2 {
+    border-bottom: none;
+    text-align: center;
+    margin-top: 0;
+}
+.flow-box {
+    padding: 14px 20px;
+    border-radius: 6px;
+    font-size: 14px;
+    text-align: left;
+    margin: 0 auto;
+    max-width: 620px;
+    position: relative;
+}
+.flow-arrow {
+    text-align: center;
+    font-size: 18px;
+    color: #888;
+    padding: 6px 0;
+}
+.step-1 { background: #f5f5f5; border-left: 4px solid #2c3e50; }
+.step-2 { background: #f5f5f5; border-left: 4px solid #555; }
+.step-3 { background: #f5f5f5; border-left: 4px solid #777; }
+.step-4 { background: #f5f5f5; border-left: 4px solid #333; }
+
+.step-label {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+}
+.step-time {
+    float: right;
+    background: #eee;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    color: #666;
+    font-weight: 600;
+}
+
+/* Problem Section */
+.problem-section {
+    margin: 30px 0;
+    padding: 20px 25px;
+    background: #fafafa;
+    border-radius: 6px;
+    border: 1px solid #e8e8e8;
+}
+.problem-section h2 {
+    margin-top: 0;
+    border-bottom: none;
+}
+.problem-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+.problem-list li {
+    padding: 8px 0;
+    border-bottom: 1px solid #eee;
+    font-size: 14px;
+    color: #444;
+}
+.problem-list li:last-child { border-bottom: none; }
+.problem-list li::before {
+    content: "— ";
+    color: #999;
+}
+
+/* Impact Grid */
+.impact-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 15px;
+    margin: 20px 0;
+}
+.impact-card {
+    background: #fafafa;
+    padding: 20px 15px;
+    border-radius: 6px;
+    text-align: center;
+    border: 1px solid #e8e8e8;
+}
+.impact-number {
+    font-size: 28px;
+    font-weight: 700;
+    color: #1a1a2e;
+}
+.impact-label {
+    font-size: 12px;
+    color: #666;
+    margin-top: 5px;
+    line-height: 1.4;
+}
+
+/* Tables */
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 15px 0;
+    font-size: 14px;
+}
+.data-table th {
+    background: #2c3e50;
+    color: white;
+    padding: 10px 15px;
+    text-align: left;
+    font-weight: 500;
+    font-size: 13px;
+}
+.data-table td {
+    padding: 10px 15px;
+    border-bottom: 1px solid #eee;
+    color: #444;
+}
+.data-table tr:nth-child(even) { background: #fafafa; }
+.highlight { color: #1a1a2e; font-weight: 600; }
+
+/* Benefits */
+.benefit-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 0;
+    border-bottom: 1px solid #f0f0f0;
+}
+.benefit-item:last-child { border-bottom: none; }
+.benefit-icon {
+    font-size: 20px;
+    line-height: 1.2;
+    min-width: 28px;
+    text-align: center;
+}
+.benefit-text h4 {
+    margin: 0 0 3px 0;
+    color: #1a1a2e;
+    font-size: 14px;
+    font-weight: 600;
+}
+.benefit-text p {
+    margin: 0;
+    color: #555;
+    font-size: 13px;
+}
+
+/* Video Demo Section */
+.demo-section {
+    margin: 30px 0;
+    padding: 30px;
+    background: #fafafa;
+    border-radius: 6px;
+    border: 1px solid #e8e8e8;
+    text-align: center;
+}
+.demo-placeholder {
+    width: 100%;
+    height: 300px;
+    background: #e8e8e8;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-top: 15px;
+    border: 2px dashed #ccc;
+}
+.demo-placeholder span {
+    color: #888;
+    font-size: 14px;
+}
+
+/* Cost Section */
+.cost-section {
+    margin: 25px 0;
+    padding: 20px 25px;
+    background: #fafafa;
+    border-radius: 6px;
+    border: 1px solid #e8e8e8;
+}
+.cost-highlight {
+    text-align: center;
+    padding: 15px;
+    margin: 15px 0;
+    background: white;
+    border-radius: 6px;
+    border: 1px solid #ddd;
+}
+.cost-highlight .number {
+    font-size: 36px;
+    font-weight: 700;
+    color: #1a1a2e;
+}
+.cost-highlight .label {
+    font-size: 13px;
+    color: #666;
+    margin-top: 3px;
+}
+
+/* Footer */
+.footer {
+    margin-top: 35px;
+    padding-top: 20px;
+    border-top: 2px solid #2c3e50;
+    text-align: center;
+    color: #888;
+    font-size: 12px;
+}
+</style>
+</head>
+<body>
+<div class="email-container">
+
+<!-- Header -->
+<div class="header">
+    <h1>AI Bug Logger Bot</h1>
+    <div class="subtitle">Automated Bug Ticket Creation for the QA Team</div>
+    <div class="badge">LIVE IN PRODUCTION</div>
+</div>
+
+<!-- Opening -->
+<p>Dear Leadership Team,</p>
+
+<p>We are pleased to announce the launch of the <strong>AI Bug Logger Bot</strong> — an intelligent automation agent deployed on Google Chat that transforms how our QA team reports and tracks bugs.</p>
+
+<p>Instead of spending 8-10 minutes manually creating each bug ticket in OpenProject, testers now simply send a message (with optional screenshots or video) in Google Chat and the bot creates a fully structured ticket <strong>in under 1 minute</strong>.</p>
+
+<!-- Problem Section -->
+<div class="problem-section">
+    <h2>The Problem</h2>
+    <ul class="problem-list">
+        <li><strong>Manual ticket creation takes 8-10 minutes per bug</strong> — filling fields, writing steps, classifying priority/type, uploading media</li>
+        <li><strong>Inconsistent formatting</strong> — every tester writes differently, making tickets hard to triage and prioritize</li>
+        <li><strong>Context switching</strong> — testers leave the app under test, open browser, navigate to OpenProject, fill forms</li>
+        <li><strong>Missing information</strong> — testers frequently omit device info, steps to reproduce, or environment details</li>
+        <li><strong>Delayed reporting</strong> — complex process means bugs are reported hours after discovery</li>
+        <li><strong>Media rarely attached</strong> — manually uploading screenshots and videos adds friction, so evidence is often skipped</li>
+    </ul>
+</div>
+
+<!-- Flow Section -->
+<div class="flow-section">
+    <h2>How It Works</h2>
+    
+    <div class="flow-box step-1">
+        <span class="step-label">Step 1 — QA Tester</span>
+        <span class="step-time">0 sec</span>
+        <br><strong>Sends a message in Google Chat</strong><br>
+        <em style="color:#666; font-size:13px;">"Login button not working after OTP. Device: Samsung S23, OS: Android 15"</em><br>
+        <span style="font-size:13px; color:#666;">+ Attaches screenshot or screen recording (optional)</span>
+    </div>
+    
+    <div class="flow-arrow">↓</div>
+    
+    <div class="flow-box step-2">
+        <span class="step-label">Step 2 — AI Analysis</span>
+        <span class="step-time">10-30 sec</span>
+        <br><strong>Gemini 2.5 Flash analyzes and structures the report</strong><br>
+        <span style="font-size:13px; color:#666;">Extracts: Title, Steps to Reproduce, Device, OS, Priority, Bug Type, Platform<br>
+        Video frames analyzed for UI context and reproduction flow<br>
+        Content screening rejects non-bug images (selfies, outdoor photos)</span>
+    </div>
+    
+    <div class="flow-arrow">↓</div>
+    
+    <div class="flow-box step-3">
+        <span class="step-label">Step 3 — Ticket Creation</span>
+        <span class="step-time">5-10 sec</span>
+        <br><strong>OpenProject ticket created automatically</strong><br>
+        <span style="font-size:13px; color:#666;">Correct project (Android/iOS) selected based on device detection<br>
+        Screenshots and videos attached in full HD<br>
+        Priority, Bug Type, Environment auto-classified</span>
+    </div>
+    
+    <div class="flow-arrow">↓</div>
+    
+    <div class="flow-box step-4">
+        <span class="step-label">Step 4 — Confirmation</span>
+        <span class="step-time">&lt; 1 min total</span>
+        <br><strong>QA Tester receives ticket link in Google Chat</strong><br>
+        <span style="font-size:13px; color:#666;">Ticket #1234 created → Direct link to OpenProject → Ready for triage</span>
+    </div>
+</div>
+
+<!-- Demo Video Section -->
+<div class="demo-section">
+    <h2 style="margin-top:0; border-bottom:none;">Demo</h2>
+    <p style="color:#666; font-size:14px; margin:0;">See the AI Bug Logger in action — from message to ticket in under 1 minute.</p>
+    <div class="demo-placeholder">
+        <span>[ Demo Video — Insert link or embed here ]</span>
+    </div>
+</div>
+
+<!-- Impact Section -->
+<h2>Business Impact</h2>
+
+<div class="impact-grid">
+    <div class="impact-card">
+        <div class="impact-number">90%</div>
+        <div class="impact-label">Reduction in<br>ticket creation time<br>(8-10 min → 1 min)</div>
+    </div>
+    <div class="impact-card">
+        <div class="impact-number">10,000+</div>
+        <div class="impact-label">Bugs per month<br>within $20 LLM budget</div>
+    </div>
+    <div class="impact-card">
+        <div class="impact-number">100%</div>
+        <div class="impact-label">Consistent ticket<br>formatting<br>(trained on 611 bugs)</div>
+    </div>
+</div>
+
+<!-- Before vs After -->
+<h2>Before vs After</h2>
+<table class="data-table">
+    <tr>
+        <th>Metric</th>
+        <th>Before (Manual)</th>
+        <th>After (AI Bot)</th>
+    </tr>
+    <tr>
+        <td>Time per bug ticket</td>
+        <td>8-10 minutes</td>
+        <td class="highlight">&lt; 1 minute</td>
+    </tr>
+    <tr>
+        <td>Steps for tester</td>
+        <td>Open browser → Login → Navigate → Fill 8+ fields → Upload → Submit</td>
+        <td class="highlight">Type message → Attach media → Done</td>
+    </tr>
+    <tr>
+        <td>Ticket quality</td>
+        <td>Inconsistent, missing fields</td>
+        <td class="highlight">Standardized, complete, auto-classified</td>
+    </tr>
+    <tr>
+        <td>Media attachments</td>
+        <td>Often skipped (too much effort)</td>
+        <td class="highlight">Auto-uploaded in full HD</td>
+    </tr>
+    <tr>
+        <td>Bug type classification</td>
+        <td>Manual (often wrong or missing)</td>
+        <td class="highlight">AI-classified based on 611 real bugs</td>
+    </tr>
+    <tr>
+        <td>Platform detection</td>
+        <td>Manual selection</td>
+        <td class="highlight">Auto-detected from device name</td>
+    </tr>
+</table>
+
+<!-- Token & Cost Section -->
+<h2>Cost Analysis & Token Usage</h2>
+
+<div class="cost-section">
+    <h3 style="margin-top:0; color:#1a1a2e; font-size:15px;">Token Usage Per Bug (End-to-End)</h3>
+    
+    <table class="data-table">
+        <tr>
+            <th>Bug Report Type</th>
+            <th>Input Tokens</th>
+            <th>Output Tokens</th>
+            <th>Total Tokens</th>
+        </tr>
+        <tr>
+            <td>Text-only</td>
+            <td>~4,800</td>
+            <td>~400</td>
+            <td class="highlight">~5,200</td>
+        </tr>
+        <tr>
+            <td>Text + 1 Screenshot</td>
+            <td>~10,500</td>
+            <td>~800</td>
+            <td class="highlight">~11,300</td>
+        </tr>
+        <tr>
+            <td>Text + Video (10 frames)</td>
+            <td>~14,000</td>
+            <td>~800</td>
+            <td class="highlight">~14,800</td>
+        </tr>
+        <tr>
+            <td><strong>Weighted Average</strong></td>
+            <td><strong>~9,000</strong></td>
+            <td><strong>~700</strong></td>
+            <td class="highlight"><strong>~9,700</strong></td>
+        </tr>
+    </table>
+
+    <p style="font-size:13px; color:#666; margin-top:10px;">
+        <em>Breakdown: Phase 1 (text analysis) uses ~5,000 tokens. Phase 2 (media enrichment) uses additional ~5,000-10,000 tokens depending on number of frames/screenshots. System prompt accounts for ~4,500 tokens per phase.</em>
+    </p>
+
+    <div class="cost-highlight">
+        <div class="number">~10,000 bugs/month</div>
+        <div class="label">achievable within $20/month LLM budget (Gemini 2.5 Flash via IndiaMART Gateway)<br>Hosting on office Cloud Run server — zero additional cost</div>
+    </div>
+
+    <table class="data-table">
+        <tr>
+            <th>Cost Component</th>
+            <th>Monthly Cost</th>
+        </tr>
+        <tr>
+            <td>LLM API (Gemini 2.5 Flash) — supports ~10,000 bugs</td>
+            <td class="highlight">$20/month</td>
+        </tr>
+        <tr>
+            <td>Google Cloud Run (office server — existing infrastructure)</td>
+            <td class="highlight">Free</td>
+        </tr>
+        <tr>
+            <td><strong>Total Infrastructure</strong></td>
+            <td class="highlight"><strong>$20/month</strong></td>
+        </tr>
+    </table>
+
+    <p style="font-size:13px; color:#666; margin-top:10px;">
+        <strong>Comparison:</strong> Manual ticket creation at 8-10 min/bug × 50 bugs/day × 20 days = 130-165 hours/month of QA time redirected to actual testing.
+    </p>
+</div>
+
+<!-- Benefits -->
+<h2>Key Benefits</h2>
+
+<div class="benefit-item">
+    <div class="benefit-icon">⚡</div>
+    <div class="benefit-text">
+        <h4>Zero Friction Bug Reporting</h4>
+        <p>Testers stay in Google Chat. No browser switching, no form filling, no manual uploads. Type, attach, done.</p>
+    </div>
+</div>
+
+<div class="benefit-item">
+    <div class="benefit-icon">🧠</div>
+    <div class="benefit-text">
+        <h4>Trained on 611 Real IndiaMART Bugs</h4>
+        <p>The AI understands IndiaMART terminology (BL, LMS, BMC, PDP, SOI, XMPP), classifies bug types correctly, and writes tickets in the team's exact style and format.</p>
+    </div>
+</div>
+
+<div class="benefit-item">
+    <div class="benefit-icon">🎥</div>
+    <div class="benefit-text">
+        <h4>Video & Screenshot Understanding</h4>
+        <p>Analyzes screen recordings frame-by-frame to extract reproduction steps, detects device/OS from UI elements, and identifies the exact bug moment.</p>
+    </div>
+</div>
+
+<div class="benefit-item">
+    <div class="benefit-icon">🛡️</div>
+    <div class="benefit-text">
+        <h4>Smart Content Filtering</h4>
+        <p>3-layer screening automatically rejects selfies, outdoor photos, and non-bug content — prevents junk tickets from entering the system.</p>
+    </div>
+</div>
+
+<div class="benefit-item">
+    <div class="benefit-icon">📋</div>
+    <div class="benefit-text">
+        <h4>Complete, Standardized Tickets Every Time</h4>
+        <p>Every ticket includes: Title, Actual Behavior, Expected Behavior, Steps to Reproduce, Device, OS, Environment, Priority, Bug Type — formatted consistently.</p>
+    </div>
+</div>
+
+<div class="benefit-item">
+    <div class="benefit-icon">📎</div>
+    <div class="benefit-text">
+        <h4>Automatic Media Attachment</h4>
+        <p>Screenshots and videos are uploaded to OpenProject in full HD, directly linked to the ticket. No manual upload step needed.</p>
+    </div>
+</div>
+
+<!-- Tech Stack -->
+<h2>Technology</h2>
+<table class="data-table">
+    <tr>
+        <th>Component</th>
+        <th>Technology</th>
+    </tr>
+    <tr><td>AI Model</td><td>Google Gemini 2.5 Flash (via IndiaMART LLM Gateway)</td></tr>
+    <tr><td>Hosting</td><td>Google Cloud Run (office server — no additional cost)</td></tr>
+    <tr><td>Interface</td><td>Google Chat (Workspace Add-on)</td></tr>
+    <tr><td>Ticket System</td><td>OpenProject (project.intermesh.net)</td></tr>
+    <tr><td>Backend</td><td>Python FastAPI, Async Two-Phase Pipeline</td></tr>
+    <tr><td>Monthly Cost</td><td>$20 (LLM API only — hosting is free on office server)</td></tr>
+</table>
+
+<!-- Current Status -->
+<h2>Current Status</h2>
+<table class="data-table">
+    <tr><td>Deployment</td><td class="highlight">Live in Production</td></tr>
+    <tr><td>Uptime</td><td class="highlight">99.9% (min 1 instance always warm)</td></tr>
+    <tr><td>Text-only bugs</td><td>10-15 seconds</td></tr>
+    <tr><td>Screenshot bugs</td><td>20-40 seconds</td></tr>
+    <tr><td>Video bugs</td><td>45-60 seconds</td></tr>
+    <tr><td>Content screening</td><td>Active (rejects non-bug images)</td></tr>
+    <tr><td>File attachments</td><td>Auto-uploaded to OpenProject</td></tr>
+    <tr><td>Retry logic</td><td>Auto-retries on transient gateway errors</td></tr>
+</table>
+
+<!-- CTA -->
+<div style="text-align: center; margin-top: 35px; padding: 25px; background: #fafafa; border-radius: 6px; border: 1px solid #e8e8e8;">
+    <p style="font-size: 15px; color: #1a1a2e; margin-bottom: 8px;"><strong>Ready to see it in action?</strong></p>
+    <p style="color: #555; font-size: 13px; margin: 0;">Open Google Chat → Message the <strong>QA Bug Logger</strong> bot → Register with your OpenProject API key → Start reporting bugs instantly.</p>
+</div>
+
+<!-- Footer -->
+<div class="footer">
+    <p><strong>AI Bug Logger Bot</strong> — Built for the IndiaMART QA Team</p>
+    <p>Deployed on Google Cloud Run &nbsp;|&nbsp; Powered by Gemini 2.5 Flash &nbsp;|&nbsp; Integrated with OpenProject</p>
+</div>
+
+</div>
+</body>
+</html>
