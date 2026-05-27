@@ -30,15 +30,19 @@ echo [preflight] step 2: env validator (placeholder — wired in task 7.4)
 echo [preflight] step 2: skipped (not yet implemented)
 
 echo [preflight] step 3: pytest -q
-python -m pytest -q
-if errorlevel 1 (
+C:\Users\Imart\AppData\Local\Programs\Python\Python311\python.exe -m pytest -q
+if %errorlevel% neq 0 (
     echo [preflight] FAIL: pytest
     exit /b 1
 )
 echo [preflight] step 3: pytest passed
 
-echo [preflight] step 4: synthetic webhook scenarios (placeholder — wired in task 11.x)
-echo [preflight] step 4: skipped (not yet implemented)
+echo [preflight] step 4: synthetic_webhook.py --scenario all
+C:\Users\Imart\AppData\Local\Programs\Python\Python311\python.exe scripts\synthetic_webhook.py --scenario all
+if %errorlevel% neq 0 (
+    echo [preflight] FAIL: synthetic_webhook
+    exit /b 1
+)
 
 echo [preflight] step 5: docker build --no-cache (placeholder — run manually for now)
 echo [preflight] step 5: skipped (manual)
