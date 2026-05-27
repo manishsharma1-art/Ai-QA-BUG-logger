@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from config import get_settings
+from env_validator import validate_env_vars, read_build_marker
 from bucket_router import extract_bucket_from_message
 from database import (
     init_database, close_database, check_database_health,
@@ -76,6 +77,10 @@ DEDUP_TTL_SECONDS = 300
 # Strong references for asyncio tasks to prevent garbage collection
 _active_background_tasks = set()
 
+# Build marker captured at startup (Theme 1.4 / Requirement 5.11)
+# Surfaced through /health.build_marker by task 8.2
+_build_marker: str = ""
+
 
 
 # ─────────────────────────────────────────────
@@ -85,11 +90,16 @@ _active_background_tasks = set()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize services on startup, clean up on shutdown."""
-    global gemini_client, op_client, chat_client
+    global gemini_client, op_client, chat_client, _build_marker
 
     logger.info("=" * 60)
     logger.info("QA Bug Logger Bot — Starting up...")
     logger.info("=" * 60)
+
+    # Theme 1.4 / Theme 1.2 — emit BUILD_MARKER and run env validator BEFORE DB init.
+    _build_marker = read_build_marker()
+    logger.info("BUILD_MARKER: %s", _build_marker)
+    validate_env_vars(settings)  # logs ENV_VALIDATION:* warnings, never raises
 
     # Initialize database
     await init_database(settings.database_url)
@@ -153,17 +163,29 @@ app.add_middleware(
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Check health of all services."""
+    from database import get_last_gcs_sync
+
     db_ok = await check_database_health()
     llm_ok = gemini_client is not None
 
+    # Populate last_gcs_sync snapshot (Theme 2.3 / task 8.2)
+    gcs_sync = get_last_gcs_sync()
+    gcs_sync_dict = gcs_sync.model_dump(mode="json") if gcs_sync else None
+
+    # Degraded rule: if last GCS sync outcome is not ok or skipped, report degraded
+    gcs_ok = gcs_sync is None or gcs_sync.outcome in ("ok", "skipped")
+    is_healthy = db_ok and llm_ok and gcs_ok
+
     return HealthResponse(
-        status="healthy" if (db_ok and llm_ok) else "degraded",
+        status="healthy" if is_healthy else "degraded",
         database="connected" if db_ok else "disconnected",
         gemini="configured" if llm_ok else "not configured",
         llm_gateway=settings.llm_base_url,
         llm_model=settings.llm_model,
         openproject=settings.openproject_base_url,
         timestamp=datetime.now(timezone.utc).isoformat(),
+        last_gcs_sync=gcs_sync_dict,
+        build_marker=_build_marker or None,
     )
 
 @app.get("/logs")
@@ -617,14 +639,14 @@ async def _handle_bug_report(
     start_time = time.time()
 
     # ── Bucket Routing (Python — no LLM) ──
-    target_project_id, cleaned_text = extract_bucket_from_message(text)
-    logger.info(f"Bucket routing: project_id={target_project_id}, cleaned_text='{cleaned_text[:80]}'")
+    target_project_id, text_for_llm = extract_bucket_from_message(text)
+    logger.info(f"Bucket routing: project_id={target_project_id}, text_for_llm='{text_for_llm[:80]}'")
 
     # ── Phase 1: Text analysis (always runs inline, ~5-10s) ──
     try:
         logger.info(f"Phase 1 INLINE: Analyzing text from {display_name}...")
         initial_report = await asyncio.wait_for(
-            gemini_client.analyze_text_brief(cleaned_text),
+            gemini_client.analyze_text_brief(text_for_llm),
             timeout=25.0  # Must fit within webhook response window
         )
         elapsed_p1 = round(time.time() - start_time, 1)
@@ -634,8 +656,8 @@ async def _handle_bug_report(
         if attachments:
             logger.info("Phase 1 validation failed, but media is present. Using QA text as fallback.")
             initial_report = ExtractedBugReport(
-                title=cleaned_text[:120] if len(cleaned_text) > 20 else "Bug reported with media attachment",
-                actual_behavior=cleaned_text,
+                title=text_for_llm[:120] if len(text_for_llm) > 20 else "Bug reported with media attachment",
+                actual_behavior=text_for_llm,
                 expected_behavior="Expected behavior not specified. See attached media.",
                 steps_to_reproduce=["See attached media for reproduction steps"],
                 device="Not specified",
@@ -660,8 +682,8 @@ async def _handle_bug_report(
         if attachments:
             logger.info("Phase 1 failed, but media is present. Using QA text as fallback.")
             initial_report = ExtractedBugReport(
-                title=cleaned_text[:120] if len(cleaned_text) > 20 else "Bug reported with media attachment",
-                actual_behavior=cleaned_text,
+                title=text_for_llm[:120] if len(text_for_llm) > 20 else "Bug reported with media attachment",
+                actual_behavior=text_for_llm,
                 expected_behavior="Expected behavior not specified. See attached media.",
                 steps_to_reproduce=["See attached media for reproduction steps"],
                 device="Not specified",
@@ -726,7 +748,7 @@ async def _handle_bug_report(
     logger.info(f"Media detected ({len(attachments)} attachments) — launching async task for Phase 2")
     task = asyncio.create_task(
         _process_media_and_create_ticket(
-            text=cleaned_text,
+            text=text_for_llm,
             initial_report=initial_report,
             attachments=attachments,
             user_api_key=user_api_key,

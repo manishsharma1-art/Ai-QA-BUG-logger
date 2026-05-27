@@ -10,59 +10,284 @@ so registrations survive container restarts and new deployments.
 import os
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 
+from pydantic import BaseModel, field_validator
 from sqlalchemy import Column, Integer, String, DateTime, Text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 
 logger = logging.getLogger("qa_bugbot.database")
 
-Base = declarative_base()
-
 # GCS bucket for persistent DB storage
 GCS_DB_BUCKET = "gs://qa-bugbot-data/qa_bugbot.db"
 LOCAL_DB_PATH = "./data/qa_bugbot.db"
 
 
-def _download_db_from_gcs():
-    """Download the database file from GCS on startup (if it exists)."""
-    logger.info("Attempting to restore DB from GCS...")
+# ─────────────────────────────────────────────
+# GCS sync status model (Theme 2 — observability)
+# ─────────────────────────────────────────────
+
+class GcsSyncStatus(BaseModel):
+    """Snapshot of the most recent GCS sync attempt; exposed via /health."""
+    op: Literal["download", "upload"]
+    started_at: datetime
+    finished_at: datetime
+    duration_ms: int
+    outcome: Literal[
+        "ok", "skipped", "import_error", "auth_error",
+        "forbidden", "not_found", "network_error", "unknown_error",
+    ]
+    bytes: int = 0
+    detail: str = ""
+
+    @field_validator("duration_ms")
+    @classmethod
+    def _ms_nonneg(cls, v: int) -> int:
+        return max(0, v)
+
+    @field_validator("bytes")
+    @classmethod
+    def _bytes_nonneg(cls, v: int) -> int:
+        return max(0, v)
+
+    @field_validator("detail")
+    @classmethod
+    def _truncate_detail(cls, v: str) -> str:
+        if v and len(v) > 500:
+            return v[:497] + "..."
+        return v
+
+    def to_log_string(self) -> str:
+        """Serialize to the structured log line format used by /logs."""
+        # Escape any embedded double-quotes in detail
+        safe_detail = self.detail.replace('"', '\\"')
+        return (
+            f"GCS_SYNC op={self.op} outcome={self.outcome} "
+            f"duration_ms={self.duration_ms} bytes={self.bytes} "
+            f'detail="{safe_detail}"'
+        )
+
+
+# Module-level state — most recent GCS sync attempt snapshot.
+# Set by _download_db_from_gcs() and _upload_db_to_gcs() (Theme 2 / tasks 5.3, 5.4).
+# Surfaced through /health.last_gcs_sync (task 8.2).
+_last_gcs_sync: Optional[GcsSyncStatus] = None
+
+
+def get_last_gcs_sync() -> Optional[GcsSyncStatus]:
+    """Return the most recent GcsSyncStatus snapshot (or None if no sync attempted yet)."""
+    return _last_gcs_sync
+
+
+Base = declarative_base()
+
+
+def _download_db_from_gcs() -> GcsSyncStatus:
+    """
+    Pull qa_bugbot.db from gs://qa-bugbot-data/.
+
+    Preconditions:
+      - LOCAL_DB_PATH parent directory is writable (created by caller if missing).
+      - Either ADC is configured (Cloud Run injects this) or GOOGLE_APPLICATION_CREDENTIALS
+        points to a valid service-account JSON.
+
+    Postconditions:
+      - On 'ok'    : LOCAL_DB_PATH exists and is a valid SQLite file.
+      - On 'skipped': blob does not exist in GCS; LOCAL_DB_PATH is left untouched
+                      (fresh start is allowed).
+      - On any error outcome: LOCAL_DB_PATH may not exist. Caller MUST tolerate this
+                              and let SQLAlchemy create a fresh DB.
+      - Always returns a GcsSyncStatus and updates module-level _last_gcs_sync.
+      - Always emits exactly one structured log line of the form:
+          GCS_SYNC op=download outcome=<outcome> duration_ms=<n> bytes=<n> detail="..."
+
+    Never re-raises.
+    """
+    global _last_gcs_sync
+    started_at = datetime.now(timezone.utc)
+    outcome: str = "unknown_error"
+    detail: str = ""
+    blob_size: int = 0
+
+    # Step 1: Try to import the GCS library (separate try so ImportError gets its own outcome)
     try:
-        from google.cloud import storage
+        from google.cloud import storage  # type: ignore[import-untyped]
+    except ImportError as e:
+        outcome = "import_error"
+        detail = f"google-cloud-storage not importable: {e}"
+        finished_at = datetime.now(timezone.utc)
+        duration_ms = int((finished_at - started_at).total_seconds() * 1000)
+        status = GcsSyncStatus(
+            op="download", started_at=started_at, finished_at=finished_at,
+            duration_ms=duration_ms, outcome=outcome, bytes=blob_size, detail=detail,
+        )
+        logger.info(status.to_log_string())
+        _last_gcs_sync = status
+        return status
+
+    # Step 2: Try to do the actual download
+    try:
+        # Lazy import of typed exception classes
+        try:
+            from google.api_core import exceptions as gax  # type: ignore[import-untyped]
+        except ImportError:
+            gax = None
+        try:
+            from google.auth import exceptions as gauth  # type: ignore[import-untyped]
+        except ImportError:
+            gauth = None
+
         client = storage.Client()
         bucket = client.bucket("qa-bugbot-data")
         blob = bucket.blob("qa_bugbot.db")
-        if blob.exists():
+
+        if not blob.exists():
+            outcome = "skipped"
+            detail = "no existing DB in GCS — starting fresh"
+        else:
             os.makedirs(os.path.dirname(LOCAL_DB_PATH), exist_ok=True)
             blob.download_to_filename(LOCAL_DB_PATH)
-            file_size = os.path.getsize(LOCAL_DB_PATH)
-            logger.info(f"✅ Database restored from GCS ({file_size} bytes)")
-        else:
-            logger.info("No existing DB in GCS — starting fresh")
-    except ImportError as e:
-        logger.error(f"google-cloud-storage not installed: {e}")
+            outcome = "ok"
+            blob_size = os.path.getsize(LOCAL_DB_PATH)
+            detail = "restored from GCS"
     except Exception as e:
-        logger.error(f"GCS DB download FAILED: {type(e).__name__}: {e}")
+        cls_name = type(e).__name__
+        # Typed-exception classification
+        if 'gauth' in dir() and gauth is not None and isinstance(e, gauth.DefaultCredentialsError):
+            outcome = "auth_error"
+            detail = f"no ADC available: {e}"
+        elif 'gax' in dir() and gax is not None and isinstance(e, gax.Forbidden):
+            outcome = "forbidden"
+            detail = f"service account lacks objectAdmin: {e}"
+        elif 'gax' in dir() and gax is not None and isinstance(e, gax.NotFound):
+            outcome = "not_found"
+            detail = f"bucket or blob missing: {e}"
+        elif isinstance(e, (TimeoutError, ConnectionError, OSError)):
+            outcome = "network_error"
+            detail = f"{cls_name}: {e}"
+        else:
+            outcome = "unknown_error"
+            detail = f"{cls_name}: {e}"
+
+    # Step 3: Finalize
+    finished_at = datetime.now(timezone.utc)
+    duration_ms = int((finished_at - started_at).total_seconds() * 1000)
+    status = GcsSyncStatus(
+        op="download",
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_ms=duration_ms,
+        outcome=outcome,
+        bytes=blob_size,
+        detail=detail,
+    )
+    logger.info(status.to_log_string())
+    _last_gcs_sync = status
+    return status
 
 
-def _upload_db_to_gcs():
-    """Upload the database file to GCS for persistence."""
+def _upload_db_to_gcs() -> GcsSyncStatus:
+    """
+    Push the local SQLite DB to gs://qa-bugbot-data/qa_bugbot.db.
+
+    Postconditions:
+      - On 'ok'    : blob updated with current local DB content.
+      - On 'skipped': LOCAL_DB_PATH does not exist (nothing to upload yet).
+      - On any error outcome: blob may be stale. Caller MUST tolerate this and
+                              expect the next successful upload to recover.
+      - Always returns a GcsSyncStatus and updates module-level _last_gcs_sync.
+      - Always emits exactly one structured log line of the form:
+          GCS_SYNC op=upload outcome=<outcome> duration_ms=<n> bytes=<n> detail="..."
+
+    Never re-raises.
+    """
+    global _last_gcs_sync
+    started_at = datetime.now(timezone.utc)
+    outcome: str = "unknown_error"
+    detail: str = ""
+    file_size: int = 0
+
+    # Skipped path: no local DB → nothing to upload
+    if not os.path.exists(LOCAL_DB_PATH):
+        outcome = "skipped"
+        detail = f"DB file not found at {LOCAL_DB_PATH}"
+        finished_at = datetime.now(timezone.utc)
+        duration_ms = int((finished_at - started_at).total_seconds() * 1000)
+        status = GcsSyncStatus(
+            op="upload", started_at=started_at, finished_at=finished_at,
+            duration_ms=duration_ms, outcome=outcome, bytes=file_size, detail=detail,
+        )
+        logger.info(status.to_log_string())
+        _last_gcs_sync = status
+        return status
+
+    # ImportError path
     try:
-        if not os.path.exists(LOCAL_DB_PATH):
-            logger.warning(f"DB file not found at {LOCAL_DB_PATH}, skipping GCS upload")
-            return
-        from google.cloud import storage
+        from google.cloud import storage  # type: ignore[import-untyped]
+    except ImportError as e:
+        outcome = "import_error"
+        detail = f"google-cloud-storage not importable: {e}"
+        finished_at = datetime.now(timezone.utc)
+        duration_ms = int((finished_at - started_at).total_seconds() * 1000)
+        status = GcsSyncStatus(
+            op="upload", started_at=started_at, finished_at=finished_at,
+            duration_ms=duration_ms, outcome=outcome, bytes=file_size, detail=detail,
+        )
+        logger.info(status.to_log_string())
+        _last_gcs_sync = status
+        return status
+
+    # Main upload path
+    try:
+        try:
+            from google.api_core import exceptions as gax  # type: ignore[import-untyped]
+        except ImportError:
+            gax = None
+        try:
+            from google.auth import exceptions as gauth  # type: ignore[import-untyped]
+        except ImportError:
+            gauth = None
+
         client = storage.Client()
         bucket = client.bucket("qa-bugbot-data")
         blob = bucket.blob("qa_bugbot.db")
         blob.upload_from_filename(LOCAL_DB_PATH)
+        outcome = "ok"
         file_size = os.path.getsize(LOCAL_DB_PATH)
-        logger.info(f"✅ Database synced to GCS ({file_size} bytes)")
-    except ImportError:
-        pass
+        detail = "synced to GCS"
     except Exception as e:
-        logger.error(f"GCS DB upload FAILED: {type(e).__name__}: {e}")
+        cls_name = type(e).__name__
+        if 'gauth' in dir() and gauth is not None and isinstance(e, gauth.DefaultCredentialsError):
+            outcome = "auth_error"
+            detail = f"no ADC available: {e}"
+        elif 'gax' in dir() and gax is not None and isinstance(e, gax.Forbidden):
+            outcome = "forbidden"
+            detail = f"service account lacks objectAdmin: {e}"
+        elif 'gax' in dir() and gax is not None and isinstance(e, gax.NotFound):
+            outcome = "not_found"
+            detail = f"bucket missing: {e}"
+        elif isinstance(e, (TimeoutError, ConnectionError, OSError)):
+            outcome = "network_error"
+            detail = f"{cls_name}: {e}"
+        else:
+            outcome = "unknown_error"
+            detail = f"{cls_name}: {e}"
+
+    finished_at = datetime.now(timezone.utc)
+    duration_ms = int((finished_at - started_at).total_seconds() * 1000)
+    status = GcsSyncStatus(
+        op="upload",
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_ms=duration_ms,
+        outcome=outcome,
+        bytes=file_size,
+        detail=detail,
+    )
+    logger.info(status.to_log_string())
+    _last_gcs_sync = status
+    return status
 
 
 # ─────────────────────────────────────────────

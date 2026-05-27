@@ -25,43 +25,43 @@ Files touched: `bucket_router.py`, `models.py`, `database.py`, `gemini_client.py
 
 - [ ] 1. Repository hygiene (Phase 0)
 
-  - [-] 1.1 Create feature branch `fix/production-reliability` from `main` and verify clean working tree
+  - [x] 1.1 Create feature branch `fix/production-reliability` from `main` and verify clean working tree
     - Run `git checkout -b fix/production-reliability` from repo root
     - Run `git status --porcelain` and confirm empty output
     - _Requirements: 7.1, 7.2_
 
-  - [-] 1.2 Verify `.env`, `.dockerignore`, `.gcloudignore` exclusion rules
+  - [x] 1.2 Verify `.env`, `.dockerignore`, `.gcloudignore` exclusion rules
     - `grep -n '\.env' .gitignore .dockerignore .gcloudignore` and confirm `.env` is excluded in all three
     - Confirm `.env.example` is allowed by `.gitignore` but excluded by `.dockerignore`
     - _Requirements: 6.3, 6.4, 6.5_
 
-  - [-] 1.3 Tag the pre-fix state for fast rollback comparison
+  - [x] 1.3 Tag the pre-fix state for fast rollback comparison
     - Run `git tag pre-reliability-fix-$(date +%Y%m%d) && git tag -l` to confirm
     - _Requirements: 5.16_
 
-- [ ] 2. Test infrastructure setup (Phase 1)
+- [x] 2. Test infrastructure setup (Phase 1)
 
-  - [~] 2.1 Create `tests/unit/` directory with `__init__.py` and shared `conftest.py`
+  - [x] 2.1 Create `tests/unit/` directory with `__init__.py` and shared `conftest.py`
     - Add `conftest.py` with fixtures for a `caplog` helper that asserts on `_log_capture`
     - Add empty `__init__.py` so pytest discovers the package
     - _Requirements: 7.3_
 
-  - [~] 2.2 Create `requirements-dev.txt` pinning `hypothesis`, `pytest`, `pytest-asyncio`
+  - [x] 2.2 Create `requirements-dev.txt` pinning `hypothesis`, `pytest`, `pytest-asyncio`
     - Pin exact versions: `hypothesis==6.108.5`, `pytest==8.3.3`, `pytest-asyncio==0.24.0`, `httpx==0.27.2`
     - Document in a comment that these are dev-only and SHALL NOT enter `requirements.txt`
     - _Requirements: 7.3, OutOfScope §"No new external runtime dependencies"_
 
-  - [~] 2.3 Create `scripts/preflight.sh` skeleton (POSIX shell)
+  - [x] 2.3 Create `scripts/preflight.sh` skeleton (POSIX shell)
     - Add steps in order from design Theme 1.4: `git status --porcelain`, env validator invocation, `pytest -q`, synthetic webhook, `docker build --no-cache`, `docker run`, `curl /health`
     - `set -euo pipefail` at top; non-zero exit on any step failure
     - Leave each step as a placeholder that prints `[preflight] step X: …` until the underlying capability lands in later phases
     - _Requirements: 7.1, 7.2_
 
-  - [~] 2.4 Create `scripts/preflight.bat` skeleton (Windows cmd)
+  - [x] 2.4 Create `scripts/preflight.bat` skeleton (Windows cmd)
     - Mirror `preflight.sh` step-for-step using `if errorlevel 1 exit /b 1` between steps
     - _Requirements: 7.1, 7.2_
 
-  - [~] 2.5 Create `scripts/synthetic_webhook.py` skeleton with `--scenario` CLI arg
+  - [x] 2.5 Create `scripts/synthetic_webhook.py` skeleton with `--scenario` CLI arg
     - Use `argparse` to accept `--scenario {S1,S2,S3,S4,S5,S6,S7,S8,S9,all}`
     - Stub each scenario as `def scenario_S1(): raise NotImplementedError("filled in task 11.x")`
     - Wire up `httpx.ASGITransport` boot of `main:app` so later scenarios just plug in
@@ -70,23 +70,23 @@ Files touched: `bucket_router.py`, `models.py`, `database.py`, `gemini_client.py
 
 - [ ] 3. Bucket router fixes (Theme 4 → Requirement 1)
 
-  - [~] 3.1 Add anchored `BUCKET_TAG_RE` constant in `bucket_router.py`
+  - [x] 3.1 Add anchored `BUCKET_TAG_RE` constant in `bucket_router.py`
     - Add `BUCKET_TAG_RE = re.compile(r'^\s*\[([A-Za-z][A-Za-z0-9 &/\-]{1,40})\]\s*')`
     - Replace the existing free-floating `re.search(r'\[([^\]]+)\]', text)` with `BUCKET_TAG_RE.match(text)`
     - _Requirements: 1.1, 1.2, 1.15_
 
-  - [~] 3.2 Stop stripping the bucket tag from the text returned to the caller
+  - [x] 3.2 Stop stripping the bucket tag from the text returned to the caller
     - In `extract_bucket_from_message`, return the **original** `text` byte-identically as `text_for_llm` regardless of whether a tag matched
     - Remove the `text[:tag_match.start()] + text[tag_match.end():]` slice and the subsequent `.strip()`
     - _Requirements: 1.9, 1.11..1.20_
 
-  - [~] 3.3 Tighten `_resolve_tag` — drop inverse substring match, raise fuzzy cutoff to 0.78, enforce 3-char alias minimum, 2-char tag minimum
+  - [x] 3.3 Tighten `_resolve_tag` — drop inverse substring match, raise fuzzy cutoff to 0.78, enforce 3-char alias minimum, 2-char tag minimum
     - Remove the `tag_lower in alias` branch (keep only `alias in tag_lower` AND `len(alias) >= 3`)
     - Change `get_close_matches(... cutoff=0.6)` to `cutoff=0.78`
     - Add early-return `if len(tag_lower) < 2: return None`
     - _Requirements: 1.5, 1.6, 1.7, 1.8_
 
-  - [~] 3.4 Add `CROSS_KEYWORD_SINGLE_WORDS` set constant in `bucket_router.py`
+  - [-] 3.4 Add `CROSS_KEYWORD_SINGLE_WORDS` set constant in `bucket_router.py`
     - `CROSS_KEYWORD_SINGLE_WORDS = {"login", "home", "homepage", "search", "page", "screen", "app", "android", "ios", "user", "buyer", "seller"}`
     - Place near the top with `PROJECT_ALIASES`
     - _Requirements: 1.25, 1.26_
@@ -119,22 +119,22 @@ Files touched: `bucket_router.py`, `models.py`, `database.py`, `gemini_client.py
     - **Validates: Requirements 1.5, 1.7, 1.9, 1.12**
     - _Requirements: 1.5, 1.7, 1.9, 1.12_
 
-- [ ] 4. Models — priority validator + defaults (Theme 5 → Requirement 4)
+- [x] 4. Models — priority validator + defaults (Theme 5 → Requirement 4)
 
-  - [~] 4.1 Replace substring priority validator with word-boundary regex in `models.py`
+  - [x] 4.1 Replace substring priority validator with word-boundary regex in `models.py`
     - Add module-level `_HIGH_PRIORITY_RE` with the exact whitelist from Requirement 4.3 wrapped in `\b…\b`
     - Add module-level `_LOW_PRIORITY_RE` with the exact whitelist from Requirement 4.4 wrapped in `\b…\b`
     - Compile with `re.IGNORECASE`
     - _Requirements: 4.3, 4.4, 4.9_
 
-  - [~] 4.2 Rewrite `validate_priority` field validator with fast path + tie-breaker + audit log
+  - [x] 4.2 Rewrite `validate_priority` field validator with fast path + tie-breaker + audit log
     - Empty/non-string → `MEDIUM`
     - Lowercased trimmed equals `high|medium|low` → fast-path return
     - Both regexes match → `MEDIUM` and `logger.warning("PRIORITY_AMBIGUOUS: both HIGH and LOW keywords matched in %r — defaulting to MEDIUM", v)`
     - Only HIGH → `HIGH`; only LOW → `LOW`; neither → `MEDIUM`
     - _Requirements: 4.1, 4.2, 4.5, 4.6, 4.7, 4.8_
 
-  - [~] 4.3 Document fail-fast vs fallback fields in `ExtractedBugReport` docstring
+  - [x] 4.3 Document fail-fast vs fallback fields in `ExtractedBugReport` docstring
     - In the class docstring, list which fields use intentional defaults (`bug_type=Functional/Logical`, `priority=Medium`, `environment=STAGE`, `platform=Android`) vs which ones must come from the LLM (`steps_to_reproduce`, `actual_behavior`, `device`, `operating_system`)
     - Reference design Theme 5.2
     - _Requirements: 3.1, 3.2_
@@ -158,23 +158,23 @@ Files touched: `bucket_router.py`, `models.py`, `database.py`, `gemini_client.py
 
 - [ ] 5. GCS sync observability (Theme 2 → Requirement 2 + Requirement 8 GCS portion)
 
-  - [~] 5.1 Define `GcsSyncStatus` Pydantic model in `database.py`
+  - [x] 5.1 Define `GcsSyncStatus` Pydantic model in `database.py`
     - Fields per design Data Models §`GcsSyncStatus`: `op`, `started_at`, `finished_at`, `duration_ms`, `outcome` (8-value Literal), `bytes`, `detail`
     - Add validators: `duration_ms >= 0`, `bytes >= 0`, `bytes > 0` only when `outcome == "ok"`, `detail` truncated to 500 chars
     - _Requirements: 2.2, 2.11_
 
-  - [~] 5.2 Add module-level `_last_gcs_sync: Optional[GcsSyncStatus] = None` plus accessor `get_last_gcs_sync()`
+  - [x] 5.2 Add module-level `_last_gcs_sync: Optional[GcsSyncStatus] = None` plus accessor `get_last_gcs_sync()`
     - Accessor returns the snapshot or `None`
     - _Requirements: 2.11, 2.12_
 
-  - [~] 5.3 Refactor `_download_db_from_gcs()` with typed exception ladder
+  - [x] 5.3 Refactor `_download_db_from_gcs()` with typed exception ladder
     - Implement the 8-outcome ladder per Requirement 2.4..2.9 and design §2.1 pseudocode
     - Always set `_last_gcs_sync` and emit exactly one `GCS_SYNC op=download outcome=… duration_ms=… bytes=… detail="…"` line via `logger.info`
     - Never re-raise
     - Return the `GcsSyncStatus` (callers may ignore)
     - _Requirements: 2.1, 2.2, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 2.10, 8.1_
 
-  - [~] 5.4 Refactor `_upload_db_to_gcs()` with same exception ladder
+  - [-] 5.4 Refactor `_upload_db_to_gcs()` with same exception ladder
     - Same 8 outcomes; `outcome=skipped` when `LOCAL_DB_PATH` does not exist locally
     - Critical change vs. current code: must NOT silently `pass` on `ImportError` — it must log and update `_last_gcs_sync` (Requirement 2.4)
     - Same `GCS_SYNC op=upload …` log line shape
@@ -197,18 +197,18 @@ Files touched: `bucket_router.py`, `models.py`, `database.py`, `gemini_client.py
 
 - [ ] 6. Phase 2 LLM correctness (Theme 3 → Requirement 3)
 
-  - [~] 6.1 Define `PHASE2_PROMPT_TEMPLATE` constant in `gemini_client.py` with all 11 mandatory fields
+  - [x] 6.1 Define `PHASE2_PROMPT_TEMPLATE` constant in `gemini_client.py` with all 11 mandatory fields
     - Use the exact template from design Theme 3.1, with `{initial_json}` and `{original_brief}` substitution slots
     - The 11 mandatory fields, in order: `is_valid`, `title`, `actual_behavior`, `expected_behavior`, `steps_to_reproduce`, `device`, `operating_system`, `environment`, `app_version`, `bug_type`, `priority`
     - Forbid `null`, empty arrays, and the literal `"See attached media for reproduction steps"`
     - _Requirements: 3.1, 3.2, 3.3_
 
-  - [~] 6.2 Define `Phase2TruncatedError` exception and `JsonCleanResult` NamedTuple
+  - [x] 6.2 Define `Phase2TruncatedError` exception and `JsonCleanResult` NamedTuple
     - Place both in `gemini_client.py` near the top
     - `JsonCleanResult` matches design Data Models §`JsonCleanResult`: `cleaned: str`, `was_truncated: bool`, `repair_log: list[str]`
     - _Requirements: 3.6, 3.7_
 
-  - [~] 6.3 Rewrite `_clean_json_response` to detect truncation and raise (no silent repair)
+  - [x] 6.3 Rewrite `_clean_json_response` to detect truncation and raise (no silent repair)
     - Strip surrounding markdown fences (preserve existing behaviour)
     - Detect: `count('{') > count('}')`, `count('[') > count(']')`, unterminated string scan
     - On any detection: `logger.error("PHASE2_TRUNCATED detections=%s preview=%r", detections, cleaned[-200:])` and `raise Phase2TruncatedError(...)`
@@ -216,7 +216,7 @@ Files touched: `bucket_router.py`, `models.py`, `database.py`, `gemini_client.py
     - **DO NOT** append closing braces, brackets, or quotes — that path is removed
     - _Requirements: 3.5, 3.6, 3.7_
 
-  - [~] 6.4 Define `DEFAULT_STUFFING_MARKERS` constant and implement `_detect_default_stuffing(report)`
+  - [-] 6.4 Define `DEFAULT_STUFFING_MARKERS` constant and implement `_detect_default_stuffing(report)`
     - Constant exposes the 4 placeholder rules from Requirement 3.10 (a..d) for greppability
     - Function is pure (no I/O, no logging) — caller logs `PHASE2_DEFAULT_STUFFED reasons=<labels>`
     - Returns `(is_stuffed: bool, reasons: list[str])` so caller can log the reasons
@@ -266,26 +266,26 @@ Files touched: `bucket_router.py`, `models.py`, `database.py`, `gemini_client.py
     - **Validates: Requirement 3.4**
     - _Requirements: 3.4_
 
-- [ ] 7. Env-var validator + BUILD_MARKER (Theme 1.2 → Requirement 5)
+- [x] 7. Env-var validator + BUILD_MARKER (Theme 1.2 → Requirement 5)
 
-  - [~] 7.1 Implement `validate_env_vars(settings)` in a new module `env_validator.py`
+  - [x] 7.1 Implement `validate_env_vars(settings)` in a new module `env_validator.py`
     - 5 checks per Requirements 5.6..5.10: empty-required, whitespace/`\n`/`\r`, `=UPPER_SNAKE` corruption signature, `LLM_API_KEY` `sk-` prefix, `DEMO_SPACE_ID` shape (`^[A-Za-z0-9_-]+$`)
     - Return `list[str]` — never raise, never mutate `settings`
     - Log each warning at WARNING level prefixed `ENV_VALIDATION:`
     - On empty list, log `ENV_VALIDATION: all checks passed` at INFO
     - _Requirements: 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 5.8, 5.9, 5.10_
 
-  - [~] 7.2 Generate a `BUILD_MARKER` value at build time
+  - [x] 7.2 Generate a `BUILD_MARKER` value at build time
     - Add `Dockerfile` step: `ARG BUILD_MARKER` followed by `RUN echo "$BUILD_MARKER" > /app/BUILD_MARKER`
     - Add Python helper `read_build_marker()` in `env_validator.py` that reads `/app/BUILD_MARKER` if present, else falls back to `os.environ.get("BUILD_MARKER")`, else returns `dev-<unix-timestamp>`
     - _Requirements: 5.11_
 
-  - [~] 7.3 Update `Dockerfile` to accept and bake the `BUILD_MARKER` build-arg
+  - [x] 7.3 Update `Dockerfile` to accept and bake the `BUILD_MARKER` build-arg
     - Place `ARG BUILD_MARKER` after the base image line, before `COPY . .`
     - Document in a `Dockerfile` comment that `gcloud builds submit` must pass `--substitutions=_BUILD_MARKER=<sha>` (wired in Phase 15)
     - _Requirements: 5.11_
 
-  - [~] 7.4 Wire `validate_env_vars` and `BUILD_MARKER` emission into `main.py` lifespan
+  - [x] 7.4 Wire `validate_env_vars` and `BUILD_MARKER` emission into `main.py` lifespan
     - In `lifespan()`, immediately after `settings = get_settings()` and before `init_database`, call `validate_env_vars(settings)` exactly once
     - Emit exactly one `logger.info("BUILD_MARKER: %s", read_build_marker())` line
     - Store the marker in a module-level `_build_marker` for `/health` to read
@@ -299,7 +299,7 @@ Files touched: `bucket_router.py`, `models.py`, `database.py`, `gemini_client.py
 
 - [ ] 8. /health endpoint extension (Theme 2.3 → Requirement 5 + 2)
 
-  - [~] 8.1 Extend `HealthResponse` in `models.py` with `last_gcs_sync` and `build_marker`
+  - [-] 8.1 Extend `HealthResponse` in `models.py` with `last_gcs_sync` and `build_marker`
     - Add `last_gcs_sync: Optional[dict] = None` and `build_marker: Optional[str] = None`
     - Match the design Data Models §`HealthResponse` shape exactly
     - _Requirements: 2.12, 5.12_
@@ -318,9 +318,9 @@ Files touched: `bucket_router.py`, `models.py`, `database.py`, `gemini_client.py
     - Assert `build_marker` is non-empty
     - _Requirements: 2.12, 2.13, 5.12_
 
-- [ ] 9. OP_CALL log wrapper (Requirement 8 OpenProject portion)
+- [x] 9. OP_CALL log wrapper (Requirement 8 OpenProject portion)
 
-  - [~] 9.1 Wrap each HTTP call in `OpenProjectClient` with an `OP_CALL` log emitter
+  - [x] 9.1 Wrap each HTTP call in `OpenProjectClient` with an `OP_CALL` log emitter
     - Create an internal `_log_op_call(start, response_or_exc)` helper that emits `OP_CALL outcome=<…> duration_ms=<n>`
     - 5 outcomes: `ok` (2xx), `client_error` (4xx), `server_error` (5xx), `network_error` (`httpx.RequestError` / `TimeoutError`), `unknown_error` (anything else)
     - Apply to `verify_api_key`, `create_work_package`, `add_attachment`, and any other public HTTP-touching method in `openproject_client.py`
@@ -401,24 +401,24 @@ Files touched: `bucket_router.py`, `models.py`, `database.py`, `gemini_client.py
     - Aggregate per-scenario pass/fail; print a one-line summary; exit with `1` on any failure (Requirement 7.5)
     - _Requirements: 7.5_
 
-- [ ] 12. Secret hygiene (Phase 5 → Requirement 6)
+- [x] 12. Secret hygiene (Phase 5 → Requirement 6)
 
-  - [~] 12.1 Replace real values in `.env.example` with placeholders
+  - [x] 12.1 Replace real values in `.env.example` with placeholders
     - Set `LLM_API_KEY=sk-REPLACE_WITH_YOUR_GATEWAY_TOKEN`, `DEFAULT_OPENPROJECT_API_KEY=REPLACE_WITH_DEMO_SPACE_API_KEY`, `DEMO_SPACE_ID=REPLACE_WITH_GOOGLE_CHAT_SPACE_ID`
     - Verify no real token remains via `grep -E '\b(sk|pk|api|key|token)[-_][A-Za-z0-9]{16,}\b' .env.example` returns no real-looking match
     - _Requirements: 6.1, 6.2_
 
-  - [~] 12.2 Add pre-commit hook script `.git/hooks/pre-commit` (and a committed copy at `scripts/hooks/pre-commit` for reproducibility)
+  - [x] 12.2 Add pre-commit hook script `.git/hooks/pre-commit` (and a committed copy at `scripts/hooks/pre-commit` for reproducibility)
     - Bash script that scans staged `.env*` files; matches `\b(sk|pk|api|key|token)[-_][A-Za-z0-9]{16,}\b`; allow-lists `REPLACE_WITH_…` and `<single-line-token>`
     - On match: print offending line + file + abort with exit code 1
     - On clean: exit 0
     - _Requirements: 6.6, 6.7, 6.8, 6.9_
 
-  - [~] 12.3 Document hook installation step in `README.md` or new `scripts/install-hooks.sh`
+  - [x] 12.3 Document hook installation step in `README.md` or new `scripts/install-hooks.sh`
     - One-liner: `ln -sf ../../scripts/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit`
     - _Requirements: 6.6_
 
-  - [~] 12.4 Verify `.gitignore`, `.dockerignore`, `.gcloudignore` enforce the exclusion contract
+  - [x] 12.4 Verify `.gitignore`, `.dockerignore`, `.gcloudignore` enforce the exclusion contract
     - Confirm `.gitignore` excludes `.env` and `*.env` while keeping `.env.example` whitelisted
     - Confirm `.dockerignore` excludes both `.env` and `.env.example`
     - Confirm `.gcloudignore` excludes `.env`

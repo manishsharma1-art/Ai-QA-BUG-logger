@@ -7,7 +7,7 @@ Handles text, images, videos (frame extraction), and audio.
 import base64
 import json
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, NamedTuple
 
 from openai import OpenAI
 
@@ -17,6 +17,102 @@ from models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────
+# Phase 2 truncation signal types (Theme 3.3)
+# ─────────────────────────────────────────────
+
+
+class Phase2TruncatedError(Exception):
+    """
+    Raised by _clean_json_response when the LLM response is missing closing
+    tokens (open braces, open brackets, unterminated string).
+
+    Should NEVER fire in normal operation given max_tokens=6000 (Theme 3.2).
+    If it does, it indicates a gateway / prompt regression that ops MUST
+    investigate. The caller in enrich_with_media catches this and falls
+    back to the Phase 1 result (Theme 3.3).
+    """
+    def __init__(self, repair_log: List[str], preview: str):
+        self.repair_log = repair_log
+        self.preview = preview
+        super().__init__(f"Phase 2 response truncated: {repair_log}")
+
+
+class JsonCleanResult(NamedTuple):
+    """Return type of `_clean_json_response` on the success path.
+
+    On detected truncation, the function raises `Phase2TruncatedError` instead
+    of returning a result, so `was_truncated` is always False on the result
+    path and `repair_log` is always empty.
+    """
+    cleaned: str            # JSON-parseable text after stripping markdown fences
+    was_truncated: bool     # always False on the result path (kept for forward-compat)
+    repair_log: List[str]   # always empty on the result path
+
+
+# ─────────────────────────────────────────────
+# Default-stuffing detector (Theme 3.4 — defense in depth)
+# ─────────────────────────────────────────────
+# Constants encode the placeholder strings the LLM is told to never emit.
+# If the LLM does emit them, _detect_default_stuffing reports the situation
+# so enrich_with_media can fall back to the Phase 1 result.
+
+DEFAULT_STUFFING_MARKERS = {
+    "steps_to_reproduce_placeholders": {
+        "See attached media for reproduction steps",
+        "Review attached media",
+    },
+    "actual_behavior_placeholders": {
+        "See attached media for details.",
+    },
+    "expected_behavior_placeholders": {
+        "Expected normal behavior.",
+    },
+}
+
+
+def _detect_default_stuffing(report: ExtractedBugReport) -> tuple[bool, list[str]]:
+    """
+    Decide whether the report is so default-laden that it would produce a useless ticket.
+
+    Returns:
+        (is_stuffed, reasons)
+
+    is_stuffed is True iff at least 2 of the following hold:
+        a) steps_to_reproduce equals or is a subset of the placeholder set
+        b) actual_behavior is in the placeholder set
+        c) expected_behavior is in the placeholder set
+        d) device == "Not specified" AND operating_system == "Not specified"
+           AND app_version == "Not specified"
+
+    reasons is the list of (a)..(d) labels that fired.
+    Pure function; no side effects, no logging.
+    """
+    reasons: list[str] = []
+
+    steps_set = set(report.steps_to_reproduce or [])
+    if steps_set and steps_set.issubset(
+        DEFAULT_STUFFING_MARKERS["steps_to_reproduce_placeholders"]
+    ):
+        reasons.append("a:steps_to_reproduce_placeholder")
+
+    if report.actual_behavior in DEFAULT_STUFFING_MARKERS["actual_behavior_placeholders"]:
+        reasons.append("b:actual_behavior_placeholder")
+
+    if report.expected_behavior in DEFAULT_STUFFING_MARKERS["expected_behavior_placeholders"]:
+        reasons.append("c:expected_behavior_placeholder")
+
+    if (
+        report.device == "Not specified"
+        and report.operating_system == "Not specified"
+        and report.app_version == "Not specified"
+    ):
+        reasons.append("d:all_device_fields_blank")
+
+    return (len(reasons) >= 2, reasons)
+
 
 # ─────────────────────────────────────────────
 # System Prompt for Bug Analysis
@@ -80,6 +176,88 @@ BL=Buy Lead, LMS=Lead Manager, BMC=Buyer Message Centre, PDP=Product Detail Page
 - Do NOT invent information. Use "Not specified" for unknown fields.
 - PRESERVE the tester's exact wording for actual/expected behavior
 - Priority MUST be "Medium" unless crash/complete failure (High) or pure cosmetic (Low)
+"""
+
+
+# ─────────────────────────────────────────────
+# Phase 2 — Media Enrichment Prompt
+# ─────────────────────────────────────────────
+# Template uses str.format() with `initial_json` and `original_brief` substitutions.
+# Literal JSON braces are escaped as `{{` and `}}`.
+# See design Theme 3.1 for the rationale: all 11 fields MANDATORY, "Not specified"
+# fallbacks, no nulls, no empty arrays, no "See attached media for reproduction steps".
+
+PHASE2_PROMPT_TEMPLATE = """\
+CONTENT SCREENING (quick check):
+If ALL attached images are natural photographs (people, animals, outdoor, food) with NO software
+UI visible → respond exactly:
+  {{"is_valid": false, "reason": "Not a software screenshot"}}
+Otherwise, proceed with bug analysis below.
+
+You are analyzing screenshots/video frames of a software bug. Respond with valid JSON.
+
+INITIAL TEXT ANALYSIS (from QA tester's brief):
+{initial_json}
+
+QA TESTER'S ORIGINAL BRIEF (kept verbatim, including any [Tag] prefix):
+{original_brief}
+
+YOUR TASK — Produce a JSON object with ALL 11 fields below. No field may be omitted.
+If a value is genuinely unknown, output the literal string "Not specified" for string fields,
+or the array ["Not specified"] for steps_to_reproduce. NEVER output an empty array, NEVER
+output null for a required field, NEVER output the placeholder
+"See attached media for reproduction steps".
+
+MANDATORY FIELDS (in this exact order, all required):
+  1.  is_valid              — boolean, must be true here (false is only used by the screening branch above)
+  2.  title                 — string, 50-120 chars, "[Element] is not [working] on [screen]"
+  3.  actual_behavior       — string, what is wrong in the media (read the UI text)
+  4.  expected_behavior     — string, what should happen instead
+  5.  steps_to_reproduce    — non-empty array of strings, ONE step per visible action in the
+                              frames. If only 2-3 frames are visible, output 2-3 steps. Never
+                              pad. Never output the placeholder string above.
+  6.  device                — exact device model from status bar / settings / brief, else "Not specified"
+  7.  operating_system      — exact OS string, else "Not specified"
+  8.  environment           — "STAGE" (default) or "LIVE" (only if tester said live/prod)
+  9.  app_version           — visible app version, else "Not specified"
+  10. bug_type              — one of "UI/UX","Functional/Logical","Network","Content"
+  11. priority              — one of "High","Medium","Low" (default Medium — see PRIORITY rules)
+
+PRIORITY RULES (the LLM has the final say within these rules — they are a floor, not an override):
+  - Default to "High" when the brief contains any of: "hangs", "hang", "hanging",
+    "crashes", "crash", "crashing", "stuck", "stuck on", "freezes", "frozen",
+    "blank screen", "white screen", "black screen", "not responsive", "unresponsive",
+    "not responding", "broken", "completely failing", "data loss", "fatal", "severe"
+    — UNLESS context clearly indicates the issue is rare/recoverable, in which case
+    you may downgrade to "Medium".
+  - Default to "Low" when the brief contains any of: "intermittent", "intermittently",
+    "sometimes", "occasionally", "rarely", "minor", "cosmetic", "trivial", "nit",
+    "slight misalignment", "slightly" — UNLESS the underlying symptom is severe (e.g.
+    "intermittent crash on payment" can still be "High" if the impact is bad enough).
+  - When BOTH a HIGH and a LOW keyword appear in the same brief (e.g. "intermittent
+    crash"), USE YOUR JUDGEMENT based on user impact and frequency. The validator
+    will tie-break to "Medium" with an audit log if you don't pick.
+  - Otherwise → "Medium" (the safe default).
+  - "High" is also still warranted for: app crash dialog visible, full login broken,
+    payments fully broken, entire feature unavailable, data loss observed.
+  - "Low" is also still warranted for: purely cosmetic issues (alignment, font, spacing).
+  - When in doubt, "Medium".
+
+OUTPUT — exactly this JSON shape, no markdown, no commentary:
+{{
+  "is_valid": true,
+  "title": "...",
+  "actual_behavior": "...",
+  "expected_behavior": "...",
+  "steps_to_reproduce": ["...", "..."],
+  "device": "...",
+  "operating_system": "...",
+  "environment": "STAGE",
+  "app_version": "...",
+  "bug_type": "Functional/Logical",
+  "priority": "Medium",
+  "logs_or_links": null
+}}
 """
 
 
@@ -190,74 +368,19 @@ class GeminiClient:
         """
         Phase 2: Enrich bug report using video frames and screenshots.
 
-        Sends the Phase 1 text analysis + all media to the LLM so it can:
-        - Verify and correct the text-based analysis against visual evidence
-        - Extract device/OS info from status bars
-        - Improve steps_to_reproduce from the sequential video flow
-        - Detect additional UI details not mentioned in the text
+        Uses PHASE2_PROMPT_TEMPLATE with max_tokens=6000 (Theme 3.2).
+        Three fall-back paths — all return initial_report, NO RETRIES:
+          1. Phase2TruncatedError → log + return initial_report
+          2. asyncio.TimeoutError → log PHASE2_SLOW + return initial_report
+          3. Default-stuffing detected → log PHASE2_DEFAULT_STUFFED + return initial_report
         """
         content_parts = []
 
-        # Provide Phase 1 context so LLM knows what to look for
+        # Build prompt from template (Theme 3.1)
         initial_json = initial_report.model_dump_json(indent=2)
-        context_prompt = (
-            "CONTENT SCREENING (quick check):\n"
-            "If ALL attached images are natural photographs (people, animals, outdoor, food) with NO software UI visible → respond: {\"is_valid\": false, \"reason\": \"Not a software screenshot\"}\n"
-            "Otherwise, proceed with bug analysis below.\n\n"
-            
-            "You are analyzing screenshots/video frames of a software bug. Respond with valid JSON.\n\n"
-            
-            "INITIAL TEXT ANALYSIS (from QA tester's brief):\n"
-            f"```json\n{initial_json}\n```\n\n"
-            f"QA TESTER'S ORIGINAL BRIEF:\n{text}\n\n"
-            
-            "YOUR TASK — Extract accurate bug data from the MEDIA:\n\n"
-            
-            "## FOR VIDEO FRAMES (sequential screenshots from screen recording):\n"
-            "The frames are in CHRONOLOGICAL ORDER. Each frame is a moment in the bug reproduction.\n"
-            "1. FRAME 1: Identify the STARTING screen. Read the page title, navigation state, any visible text.\n"
-            "2. FRAME 2-N: For each subsequent frame, identify WHAT CHANGED from the previous frame.\n"
-            "   - Did user tap a button? Which one? (read the button text)\n"
-            "   - Did a new screen load? What screen?\n"
-            "   - Did an error appear? What error text?\n"
-            "   - Did a popup/dialog open? What does it say?\n"
-            "3. FINAL FRAMES: Identify the BUG STATE — what's wrong in the last frame(s).\n"
-            "4. Convert frame transitions into steps_to_reproduce. Each visible action = one step.\n"
-            "   ONLY describe actions you can ACTUALLY SEE in frame transitions. Do NOT invent steps.\n\n"
-            
-            "## FOR SCREENSHOTS (1-3 static images):\n"
-            "1. READ all visible text in the image (OCR): page titles, button labels, error messages, URLs in address bar.\n"
-            "2. IDENTIFY the screen/page name from header or navigation.\n"
-            "3. IDENTIFY what's wrong (the bug) — what looks broken, misaligned, missing, or incorrect.\n"
-            "4. If multiple screenshots: describe the flow from image 1 → 2 → 3.\n"
-            "5. For desktop screenshots: READ THE URL from the browser address bar.\n\n"
-            
-            "## DEVICE/OS EXTRACTION:\n"
-            "- Mobile: Check the STATUS BAR (top of screen) for time format, icons, signal bars.\n"
-            "- Look for device model in Settings screenshots or About screen.\n"
-            "- If tester mentioned device/OS in their text, use that.\n\n"
-            
-            "## OUTPUT JSON (include is_valid: true):\n"
-            "{\n"
-            '  "is_valid": true,\n'
-            '  "title": "Concise bug title based on what you see",\n'
-            '  "actual_behavior": "What you observe is wrong in the media",\n'
-            '  "expected_behavior": "What should happen instead",\n'
-            '  "steps_to_reproduce": ["Step 1 from frame analysis", "Step 2", ...],\n'
-            '  "device": "From text or status bar or Not specified",\n'
-            '  "operating_system": "From text or UI or Not specified",\n'
-            '  "environment": "STAGE or LIVE",\n'
-            '  "app_version": "If visible in UI or Not specified",\n'
-            '  "bug_type": "UI/UX or Functional/Logical",\n'
-            '  "priority": "Medium (default) or High (only if crash/complete failure)",\n'
-            '  "logs_or_links": "Any URLs visible in screenshots or null"\n'
-            "}\n\n"
-            
-            "CRITICAL RULES:\n"
-            "- steps_to_reproduce must come from what you SEE in frames. Do NOT invent navigation steps.\n"
-            "- If you can only see 2 screens, return only 2-3 steps. Do NOT pad with assumed steps.\n"
-            "- Use EXACT text visible in UI elements (button names, menu items, error messages).\n"
-            "- Priority: Medium unless you see a crash dialog or blank/error screen.\n"
+        context_prompt = PHASE2_PROMPT_TEMPLATE.format(
+            initial_json=initial_json,
+            original_brief=text,
         )
         content_parts.append({"type": "text", "text": context_prompt})
 
@@ -316,54 +439,48 @@ class GeminiClient:
             {"role": "user", "content": content_parts},
         ]
 
+        import asyncio
+
+        # ── Single attempt, no retries (Theme 3.2) ──
         try:
-            import asyncio
-            from openai import AuthenticationError, APIConnectionError
             loop = asyncio.get_event_loop()
-
-            # Retry logic for transient gateway auth errors
-            max_retries = 2
-            for attempt in range(1, max_retries + 1):
-                try:
-                    # Extended timeout: frames can take time for LLM to analyze
-                    response = await asyncio.wait_for(
-                        loop.run_in_executor(
-                            None,
-                            lambda: self.client.chat.completions.create(
-                                model=self.model,
-                                messages=messages,
-                                response_format={"type": "json_object"},
-                                temperature=0.2,
-                                max_tokens=2000,
-                                timeout=180.0,  # 3 min client timeout for video
-                            ),
-                        ),
-                        timeout=210.0  # 3.5 min overall timeout
-                    )
-                    break  # Success — exit retry loop
-                except (AuthenticationError, APIConnectionError) as e:
-                    logger.warning(f"Phase 2 transient LLM error (attempt {attempt}/{max_retries}): {e}")
-                    if attempt < max_retries:
-                        await asyncio.sleep(3)
-                        continue
-                    else:
-                        raise
-
-            response_text = response.choices[0].message.content
-            logger.info(f"Phase 2 LLM response: {response_text[:500]}")
-
-            cleaned = self._clean_json_response(response_text)
-            result_json = json.loads(cleaned)
-            
-            # Check if media was rejected by inline screening
-            if "is_valid" in result_json and not result_json["is_valid"]:
-                return result_json  # Return dictionary to be processed by caller as rejection
-                
-            return ExtractedBugReport(**result_json)
-
+            response = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: self.client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        response_format={"type": "json_object"},
+                        temperature=0.2,
+                        max_tokens=6000,       # Theme 3.2: 3× safety multiplier
+                        timeout=45.0,          # Theme 3.2: client timeout
+                    ),
+                ),
+                timeout=50.0  # Theme 3.2.1: asyncio.wait_for timeout
+            )
         except asyncio.TimeoutError:
-            logger.error("Phase 2 media analysis timed out after 210s")
-            raise TimeoutError("Video analysis timed out. Falling back to text analysis.")
+            # Fall-back path 2: timeout → return Phase 1 result
+            logger.error(
+                "PHASE2_SLOW outcome=timeout duration_ms=50000 frames=%d",
+                frame_count,
+            )
+            return initial_report
+        except Exception as e:
+            logger.error(f"Phase 2 LLM call failed: {e}")
+            return initial_report
+
+        response_text = response.choices[0].message.content
+        logger.info(f"Phase 2 LLM response: {response_text[:500]}")
+
+        # ── Parse response ──
+        try:
+            cleaned = self._clean_json_response(response_text)
+        except Phase2TruncatedError:
+            # Fall-back path 1: truncation → return Phase 1 result
+            return initial_report
+
+        try:
+            result_json = json.loads(cleaned)
         except json.JSONDecodeError as e:
             logger.error(f"Phase 2 JSON parse failed: {e}")
             # Safety net: if JSON is broken but the AI was clearly trying to reject,
@@ -374,58 +491,91 @@ class GeminiClient:
                 raw = ""
             if raw and "is_valid" in raw.lower() and "false" in raw.lower():
                 logger.info("Detected rejection intent in malformed JSON — extracting reason")
-                import re
-                reason_match = re.search(r'"reason"\s*:\s*"([^"]+)"', raw)
+                import re as _re
+                reason_match = _re.search(r'"reason"\s*:\s*"([^"]+)"', raw)
                 reason = reason_match.group(1) if reason_match else "The attached image does not appear to be an app screenshot or bug recording."
                 return {"is_valid": False, "reason": reason}
-            raise ValueError(f"AI returned invalid JSON from media analysis: {e}")
-        except Exception as e:
-            logger.error(f"Phase 2 media analysis failed: {e}")
-            raise
+            # Fall back to Phase 1 on unparseable JSON
+            return initial_report
+
+        # Check if media was rejected by inline screening
+        if "is_valid" in result_json and not result_json["is_valid"]:
+            return result_json  # Return dictionary to be processed by caller as rejection
+
+        enriched_report = ExtractedBugReport(**result_json)
+
+        # ── Fall-back path 3: default-stuffing check ──
+        is_stuffed, reasons = _detect_default_stuffing(enriched_report)
+        if is_stuffed:
+            logger.error("PHASE2_DEFAULT_STUFFED reasons=%s", reasons)
+            return initial_report
+
+        return enriched_report
 
     def _clean_json_response(self, response_text: str) -> str:
-        """Clean LLM response to extract valid JSON (strip markdown fences, repair truncation)."""
-        cleaned = response_text.strip()
+        """
+        Strip markdown fences from an LLM JSON response. Detect truncation and
+        raise Phase2TruncatedError instead of silently repairing.
+
+        Theme 3.3: With max_tokens=6000, truncation is unexpected. If we observe
+        unbalanced braces/brackets or an unterminated string, that's a load-bearing
+        alert — log at ERROR and raise. The caller in enrich_with_media falls back
+        to the Phase 1 result.
+
+        Returns: the cleaned JSON string (parseable by json.loads).
+        Raises:  Phase2TruncatedError on detected truncation.
+        """
+        cleaned = (response_text or "").strip()
+
+        # Strip markdown fences
         if cleaned.startswith("```"):
             lines = cleaned.split("\n")
             lines = [l for l in lines if not l.strip().startswith("```")]
-            cleaned = "\n".join(lines)
-        
-        # Attempt to repair truncated JSON (common issue with LLM gateway)
-        cleaned = cleaned.strip()
-        if cleaned and not cleaned.endswith("}"):
-            # JSON was truncated — try to close it
-            # Count open braces/brackets
-            open_braces = cleaned.count("{") - cleaned.count("}")
-            open_brackets = cleaned.count("[") - cleaned.count("]")
-            
-            # If we're inside a string (unterminated), close it
-            # Find last quote state
-            in_string = False
-            escape_next = False
-            for ch in cleaned:
-                if escape_next:
-                    escape_next = False
-                    continue
-                if ch == '\\':
-                    escape_next = True
-                    continue
-                if ch == '"':
-                    in_string = not in_string
-            
+            cleaned = "\n".join(lines).strip()
+
+        if not cleaned:
+            # Empty response is a truncation symptom
+            detections = ["empty response"]
+            logger.error(
+                'PHASE2_TRUNCATED detections=%s preview=""',
+                detections,
+            )
+            raise Phase2TruncatedError(detections, preview="")
+
+        # Detect truncation
+        open_braces = cleaned.count("{") - cleaned.count("}")
+        open_brackets = cleaned.count("[") - cleaned.count("]")
+
+        # Unterminated-string scan (handles backslash-escapes)
+        in_string = False
+        escape_next = False
+        for ch in cleaned:
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == "\\":
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+
+        was_truncated = (open_braces > 0) or (open_brackets > 0) or in_string
+
+        if was_truncated:
+            detections: List[str] = []
             if in_string:
-                cleaned += '"'  # Close the unterminated string
-            
-            # Close any open arrays
-            for _ in range(open_brackets):
-                cleaned += "]"
-            
-            # Close any open objects
-            for _ in range(open_braces):
-                cleaned += "}"
-            
-            logger.warning(f"JSON repair applied: closed {open_braces} braces, {open_brackets} brackets, in_string={in_string}")
-        
+                detections.append("unterminated string")
+            if open_brackets > 0:
+                detections.append(f"open arrays={open_brackets}")
+            if open_braces > 0:
+                detections.append(f"open objects={open_braces}")
+            preview = cleaned[-200:]
+            logger.error(
+                "PHASE2_TRUNCATED detections=%s preview=%r",
+                detections, preview,
+            )
+            raise Phase2TruncatedError(detections, preview=preview)
+
         return cleaned
 
     def _extract_video_frames(

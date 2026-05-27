@@ -2,6 +2,16 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# ─────────────────────────────────────────────
+# Build marker — written at build time, read at startup.
+# Pass via: docker build --build-arg BUILD_MARKER=<git-short-sha> ...
+# Or via:   gcloud builds submit --substitutions=_BUILD_MARKER=<sha> ...
+# The /app/BUILD_MARKER file is read by env_validator.read_build_marker()
+# at startup; the value is then logged once and exposed on /health.
+# ─────────────────────────────────────────────
+ARG BUILD_MARKER=unknown
+RUN echo "$BUILD_MARKER" > /app/BUILD_MARKER
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y gcc && rm -rf /var/lib/apt/lists/*
 

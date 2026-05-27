@@ -3,10 +3,53 @@ Pydantic models for QA Bug Logger Bot.
 Includes API request/response models and AI structured output schema.
 """
 
+import logging
+import re
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List
 from datetime import datetime
 from enum import Enum
+
+logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────
+# Priority keyword regexes (Theme 5 / Requirement 4)
+#
+# These compiled, word-boundary-anchored regexes drive `validate_priority`
+# so that substrings like `highlighted` no longer trip the HIGH branch and
+# `Medium-High` no longer resolves to HIGH. Whitelists are taken verbatim
+# from Requirement 4.3 (HIGH) and Requirement 4.4 (LOW).
+# ─────────────────────────────────────────────
+
+_HIGH_PRIORITY_RE = re.compile(
+    r"(?<![a-zA-Z0-9_\-])("
+    # Existing whitelist
+    r"high|broken|completely failing|data loss|fatal|severe|"
+    # Crash family
+    r"crash|crashes|crashing|"
+    # Hang / freeze / unresponsive family
+    r"hang|hangs|hanging|"
+    r"stuck|stuck on|"
+    r"freezes|frozen|"
+    r"not responsive|unresponsive|not responding|"
+    # Visible-failure-screen family
+    r"blank screen|white screen|black screen"
+    r")(?![a-zA-Z0-9_\-])",
+    re.IGNORECASE,
+)
+
+_LOW_PRIORITY_RE = re.compile(
+    r"(?<![a-zA-Z0-9_\-])("
+    # Existing whitelist
+    r"low|minor|cosmetic|trivial|nit|"
+    # Frequency qualifiers (rare/recoverable issues default to LOW)
+    r"intermittent|intermittently|sometimes|occasionally|rarely|"
+    # Severity qualifiers
+    r"slight misalignment|slightly"
+    r")(?![a-zA-Z0-9_\-])",
+    re.IGNORECASE,
+)
 
 
 # ─────────────────────────────────────────────
@@ -72,7 +115,29 @@ class PlatformType(str, Enum):
 class ExtractedBugReport(BaseModel):
     """
     Structured bug report extracted by Gemini AI.
-    This schema is used for structured output generation.
+
+    Per design Theme 5.2, this schema distinguishes two field categories:
+
+    INTENTIONAL FALLBACKS (defaults are acceptable when LLM omits the field):
+      - title:           "Bug report"
+      - expected_behavior: "Expected normal behavior."
+      - app_version:     "Not specified"
+      - environment:     EnvironmentType.STAGE
+      - bug_type:        BugType.FUNCTIONAL  (83% of bugs are functional per audit)
+      - priority:        PriorityLevel.MEDIUM  (95% of bugs should be Medium per Theme 5.1)
+      - platform:        PlatformType.ANDROID  (overridden by bucket_router; see Theme 4)
+      - logs_or_links:   None (genuinely optional)
+      - category:        None (genuinely optional)
+
+    FAIL-FAST FIELDS (default values trigger _detect_default_stuffing in
+    gemini_client.enrich_with_media → fall back to Phase 1 result):
+      - actual_behavior:    must come from LLM analysis of brief or media
+      - steps_to_reproduce: must come from LLM analysis of frames or text
+      - device:             when ALL of {device, operating_system, app_version} are
+                            "Not specified", treated as default-stuffed (rule (d))
+
+    See gemini_client._detect_default_stuffing for the runtime check that
+    enforces fail-fast behaviour.
     """
     title: str = Field(
         default="Bug report",
@@ -258,10 +323,35 @@ class ExtractedBugReport(BaseModel):
     def validate_priority(cls, v):
         if not v or not isinstance(v, str):
             return PriorityLevel.MEDIUM
-        v_clean = v.strip().lower()
-        if 'high' in v_clean:
+
+        v_clean = v.strip()
+
+        # Fast path — LLM emitted a clean enum value
+        canonical = v_clean.lower()
+        if canonical == "high":
             return PriorityLevel.HIGH
-        if 'low' in v_clean:
+        if canonical == "medium":
+            return PriorityLevel.MEDIUM
+        if canonical == "low":
+            return PriorityLevel.LOW
+
+        # Word-boundary fallback for natural-language inputs
+        high_match = bool(_HIGH_PRIORITY_RE.search(v_clean))
+        low_match = bool(_LOW_PRIORITY_RE.search(v_clean))
+
+        # Tie-breaker: both classes match (e.g. "intermittent crash") — return MEDIUM
+        # and log so we can audit these cases later.
+        if high_match and low_match:
+            logger.warning(
+                "PRIORITY_AMBIGUOUS: both HIGH and LOW keywords matched in %r — "
+                "defaulting to MEDIUM",
+                v_clean,
+            )
+            return PriorityLevel.MEDIUM
+
+        if high_match:
+            return PriorityLevel.HIGH
+        if low_match:
             return PriorityLevel.LOW
         return PriorityLevel.MEDIUM
 
@@ -317,6 +407,14 @@ class HealthResponse(BaseModel):
     llm_model: Optional[str] = None
     openproject: Optional[str] = None
     timestamp: str
+    last_gcs_sync: Optional[dict] = Field(
+        default=None,
+        description="Most recent GcsSyncStatus snapshot (or None if no sync attempted)."
+    )
+    build_marker: Optional[str] = Field(
+        default=None,
+        description="Build identifier emitted at startup (git-sha or build-time)."
+    )
 
 
 class TicketCreatedResponse(BaseModel):

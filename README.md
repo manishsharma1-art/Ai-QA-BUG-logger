@@ -133,6 +133,32 @@ QA_BUG_Logger/
 | Accountable | — | 👤 QA manually |
 | Version | — | 👤 QA manually |
 
+## Pre-commit hook (secret scanning)
+
+Before your first commit on this repo, install the pre-commit hook that scans
+staged `.env*` files for token-like values:
+
+```bash
+bash scripts/install-hooks.sh
+```
+
+That script copies `scripts/hooks/pre-commit` (committed) into
+`.git/hooks/pre-commit` (gitignored) and marks it executable. If you prefer a
+symlink, the equivalent one-liner is:
+
+```bash
+ln -sf ../../scripts/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+```
+
+The hook rejects any staged `.env*` file containing a token-like prefix
+(`sk-`, `pk-`, `api-`, `key-`, `token-` followed by 16+ alphanumeric chars)
+unless the line matches a known placeholder pattern (`REPLACE_WITH_*`,
+`<single-line-token>`, `<space-id>`, or other angle-bracketed placeholders).
+On a clean staging area the hook is silent and exits 0; on a match it prints
+the offending file and line and aborts the commit.
+
+To bypass in an emergency (not recommended): `git commit --no-verify`.
+
 ## License
 
 Internal use — IndiaMART InterMESH Ltd.

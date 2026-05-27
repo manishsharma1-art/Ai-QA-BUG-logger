@@ -19,3 +19,4 @@ bug_analysis_output.txt
 test_*.py
 analyze_bugs.py
 extract_training.py
+service-account.json

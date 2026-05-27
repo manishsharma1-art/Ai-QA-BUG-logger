@@ -21,6 +21,19 @@ from config import OP_PROJECTS
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
+# Anchored bucket-tag regex
+# ─────────────────────────────────────────────
+# Only match a bracketed tag at the START of the message (after optional
+# whitespace). The tag body must begin with a letter and consist of letters,
+# digits, spaces, and the punctuation `& / -`, length 2..41 chars total. This
+# prevents free-floating brackets like `[step 3]` or `[2024-05-12]` from being
+# treated as bucket tags.
+BUCKET_TAG_RE = re.compile(
+    r'^\s*\[([A-Za-z][A-Za-z0-9 &/\-]{1,40})\]\s*',
+    re.UNICODE,
+)
+
+# ─────────────────────────────────────────────
 # All known project names + aliases
 # ─────────────────────────────────────────────
 
@@ -140,6 +153,17 @@ PROJECT_ALIASES = {
     "indiamart affiliate": "IndiaMART Affiliate",
 }
 
+# ─────────────────────────────────────────────
+# Cross-keyword single words — too generic to single-handedly route a bucket
+# ─────────────────────────────────────────────
+# These words appear in many bucket aliases AND in many bug descriptions, so
+# they get score=1 in the free-text scoring pass instead of the default score=5.
+# See _extract_bucket_from_freetext (Theme 4.5).
+CROSS_KEYWORD_SINGLE_WORDS = {
+    "login", "home", "homepage", "search", "page", "screen",
+    "app", "android", "ios", "user", "buyer", "seller",
+}
+
 # Android device keywords
 ANDROID_DEVICES = [
     "samsung", "iqoo", "realme", "motorola", "moto", "poco",
@@ -154,74 +178,167 @@ IOS_DEVICES = ["iphone", "ipad", "apple"]
 def extract_bucket_from_message(text: str) -> Tuple[Optional[int], str]:
     """
     Extract the target project ID from the message text.
-    
+
     Returns:
-        (project_id, cleaned_text) — project_id is None if no match found (use default)
-        cleaned_text has the [tag] stripped out
+        (project_id, text_for_llm) — project_id is None if no match found (use default).
+
+    The returned text_for_llm is the ORIGINAL `text`, byte-identical, regardless of
+    whether a bucket tag matched. The bucket tag is intentionally NOT stripped —
+    the LLM needs to see the QA tester's brief verbatim (including any `[Tag]`
+    prefix) so that downstream prompts and ticket bodies preserve user intent.
+    See design Theme 4 / Requirement 1.9.
+
+    Three-layer routing (Theme 4.6):
+      Layer 1: Explicit [Tag] at start (highest priority)
+      Layer 2: Free-text bucket extraction (scoring-based)
+      Layer 3: Device/OS detection (fallback)
     """
-    # Step 1: Extract [Tag] from message
-    tag_match = re.search(r'\[([^\]]+)\]', text)
-    
+    # Layer 1: Extract [Tag] from message (anchored — must be at the start,
+    # after optional whitespace; rejects free-floating brackets like [step 3]).
+    tag_match = BUCKET_TAG_RE.match(text)
+
     if tag_match:
         tag = tag_match.group(1).strip()
-        cleaned_text = text[:tag_match.start()] + text[tag_match.end():]
-        cleaned_text = cleaned_text.strip()
-        
+
         project_id = _resolve_tag(tag)
         if project_id:
             logger.info(f"Bucket routing: [{tag}] → project {project_id}")
-            return project_id, cleaned_text
+            return project_id, text
         else:
-            logger.warning(f"Bucket routing: [{tag}] — no match found, using device detection")
-            # Tag didn't match, still use cleaned text but fall through to device detection
-            return _detect_device_platform(cleaned_text), cleaned_text
-    
-    # No tag found — detect from device/OS
+            logger.warning(f"Bucket routing: [{tag}] — no match found, trying free-text")
+            # Tag didn't resolve; fall through to Layer 2
+
+    # Layer 2: Free-text bucket extraction (Theme 4.5)
+    project_id = _extract_bucket_from_freetext(text)
+    if project_id:
+        logger.info(f"Bucket routing: free-text match → project {project_id}")
+        return project_id, text
+
+    # Layer 3: Device/OS detection (existing fallback)
     project_id = _detect_device_platform(text)
-    logger.info(f"Bucket routing: no tag, device detection → project {project_id}")
+    logger.info(f"Bucket routing: no bucket mention, device detection → project {project_id}")
     return project_id, text
 
 
+# Regex for "bucket - X", "bucket: X", "bucket X" shorthand
+_BUCKET_SHORTHAND_RE = re.compile(
+    r'\bbucket\s*[-:]?\s*([A-Za-z][A-Za-z0-9 &/\-]{1,40})',
+    re.IGNORECASE,
+)
+
+
+def _extract_bucket_from_freetext(text: str) -> Optional[int]:
+    """
+    Free-text bucket extraction layer (Theme 4.5).
+
+    Scans the message for:
+      Step A: "bucket - X" / "bucket: X" / "bucket X" shorthand patterns
+      Step B: Known bucket names and multi-word aliases (scoring-based)
+
+    Returns the project ID or None if no confident match.
+    Pure Python, no LLM call.
+    """
+    text_lower = text.lower()
+    scores: dict = {}  # project_id → cumulative score
+
+    # ── Step A: bucket-shorthand pattern ──
+    shorthand_match = _BUCKET_SHORTHAND_RE.search(text_lower)
+    if shorthand_match:
+        candidate = shorthand_match.group(1).strip()
+        project_id = _resolve_tag(candidate)
+        if project_id:
+            return project_id  # explicit shorthand wins immediately
+
+    # ── Step B: scan for known bucket names and multi-word aliases ──
+    # Higher weight = more specific
+
+    # Check canonical project names (multi-word canonical names get weight 10)
+    for canonical_name, project_id in OP_PROJECTS.items():
+        name_lower = canonical_name.lower()
+        # Check for whole-word phrase match using word boundaries
+        pattern = r'\b' + re.escape(name_lower) + r'\b'
+        if re.search(pattern, text_lower):
+            scores[project_id] = scores.get(project_id, 0) + 10
+
+    # Check aliases
+    for alias, canonical_name in PROJECT_ALIASES.items():
+        if canonical_name not in OP_PROJECTS:
+            continue
+        project_id = OP_PROJECTS[canonical_name]
+        alias_words = alias.split()
+
+        if len(alias_words) >= 2:
+            # Multi-word alias — weight 8
+            pattern = r'\b' + re.escape(alias) + r'\b'
+            if re.search(pattern, text_lower):
+                scores[project_id] = scores.get(project_id, 0) + 8
+        else:
+            # Single-word alias
+            if alias in CROSS_KEYWORD_SINGLE_WORDS:
+                weight = 1  # generic, ambiguous word
+            else:
+                weight = 5  # specific single-word alias
+            pattern = r'\b' + re.escape(alias) + r'\b'
+            if re.search(pattern, text_lower):
+                scores[project_id] = scores.get(project_id, 0) + weight
+
+    if not scores:
+        return None
+
+    # ── Step C: tie-breaker ──
+    max_score = max(scores.values())
+    winners = [pid for pid, s in scores.items() if s == max_score]
+
+    if len(winners) > 1 and max_score < 10:
+        # Genuinely ambiguous low-confidence match — let device detection decide
+        return None
+
+    return winners[0]  # single winner OR multi-word match always wins ties
+
+
 def _resolve_tag(tag: str) -> Optional[int]:
-    """Resolve a tag string to a project ID using exact → alias → fuzzy matching."""
+    """Resolve a tag string to a project ID using exact → alias → substring → fuzzy."""
     tag_lower = tag.lower().strip()
-    
-    # Step 1: Exact match in OP_PROJECTS
+    if len(tag_lower) < 2:
+        return None
+
+    # Step 1: Exact match (case-sensitive)
     if tag in OP_PROJECTS:
         return OP_PROJECTS[tag]
-    
+
     # Step 2: Case-insensitive exact match
     for key, proj_id in OP_PROJECTS.items():
         if key.lower() == tag_lower:
             return proj_id
-    
-    # Step 3: Alias match
+
+    # Step 3: Alias exact match
     if tag_lower in PROJECT_ALIASES:
-        project_name = PROJECT_ALIASES[tag_lower]
-        if project_name in OP_PROJECTS:
-            return OP_PROJECTS[project_name]
-    
-    # Step 4: Partial alias match (tag contains alias or alias contains tag)
-    for alias, project_name in PROJECT_ALIASES.items():
-        if alias in tag_lower or tag_lower in alias:
-            if project_name in OP_PROJECTS:
-                return OP_PROJECTS[project_name]
-    
-    # Step 5: Fuzzy match against all project names
-    all_names = list(OP_PROJECTS.keys()) + list(PROJECT_ALIASES.keys())
-    matches = get_close_matches(tag_lower, [n.lower() for n in all_names], n=1, cutoff=0.6)
+        proj_name = PROJECT_ALIASES[tag_lower]
+        if proj_name in OP_PROJECTS:
+            return OP_PROJECTS[proj_name]
+
+    # Step 4: Alias-substring match (alias must appear within tag, alias must be ≥3 chars)
+    # Sort by length descending so longer aliases match first (fixes Property 3 for typos like 'adesktop lms' vs 'desktop lms' vs 'lms')
+    for alias, proj_name in sorted(PROJECT_ALIASES.items(), key=lambda x: len(x[0]), reverse=True):
+        if len(alias) >= 3 and alias in tag_lower:
+            if proj_name in OP_PROJECTS:
+                return OP_PROJECTS[proj_name]
+
+    # Step 5: Fuzzy match, cutoff raised to 0.78
+    candidates = [n.lower() for n in
+                  list(OP_PROJECTS.keys()) + list(PROJECT_ALIASES.keys())]
+    matches = get_close_matches(tag_lower, candidates, n=1, cutoff=0.78)
     if matches:
         matched_lower = matches[0]
-        # Find the original key
         for key in OP_PROJECTS:
             if key.lower() == matched_lower:
                 logger.info(f"Fuzzy matched [{tag}] → {key}")
                 return OP_PROJECTS[key]
-        for alias, project_name in PROJECT_ALIASES.items():
-            if alias.lower() == matched_lower and project_name in OP_PROJECTS:
-                logger.info(f"Fuzzy matched [{tag}] → {project_name} (via alias '{alias}')")
-                return OP_PROJECTS[project_name]
-    
+        for alias, proj_name in PROJECT_ALIASES.items():
+            if alias.lower() == matched_lower and proj_name in OP_PROJECTS:
+                logger.info(f"Fuzzy matched [{tag}] → {proj_name} (via alias '{alias}')")
+                return OP_PROJECTS[proj_name]
+
     return None
 
 

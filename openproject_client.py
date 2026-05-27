@@ -6,6 +6,7 @@ Uses per-user API keys for authentication.
 import base64
 import logging
 import json
+import time
 from typing import Optional, Dict, Any
 
 import httpx
@@ -17,6 +18,67 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _log_op_call(
+    method: str,
+    url: str,
+    start_ts: float,
+    response: Optional[httpx.Response] = None,
+    exc: Optional[BaseException] = None,
+) -> None:
+    """
+    Emit a single structured ``OP_CALL`` log line per OpenProject HTTP call.
+
+    The line shape is::
+
+        OP_CALL method=<…> url=<…> outcome=<…> [status_code=<…>] duration_ms=<…> [detail="…"]
+
+    Five outcomes:
+      - ``ok``            : 2xx response
+      - ``client_error``  : 4xx response
+      - ``server_error``  : 5xx response
+      - ``network_error`` : ``httpx.RequestError`` / ``TimeoutError``
+      - ``unknown_error`` : anything else (including the defensive
+                            "no response and no exception" case)
+
+    This helper only emits a log line; it never raises and never mutates state.
+    Callers are expected to handle the response or re-raise the exception
+    separately. ``httpx.TimeoutException`` is a subclass of
+    ``httpx.RequestError`` and is therefore classified as ``network_error``.
+    """
+    duration_ms = int((time.time() - start_ts) * 1000)
+    if exc is not None:
+        if isinstance(exc, (httpx.RequestError, TimeoutError)):
+            outcome = "network_error"
+        else:
+            outcome = "unknown_error"
+        logger.warning(
+            'OP_CALL method=%s url=%s outcome=%s duration_ms=%d detail="%s: %s"',
+            method, url, outcome, duration_ms,
+            type(exc).__name__, str(exc)[:200],
+        )
+        return
+    if response is None:
+        # Defensive: shouldn't happen in normal flow.
+        logger.warning(
+            'OP_CALL method=%s url=%s outcome=unknown_error duration_ms=%d detail="no response"',
+            method, url, duration_ms,
+        )
+        return
+    sc = response.status_code
+    if 200 <= sc < 300:
+        outcome = "ok"
+    elif 400 <= sc < 500:
+        outcome = "client_error"
+    elif 500 <= sc < 600:
+        outcome = "server_error"
+    else:
+        outcome = "unknown_error"
+    logger.info(
+        'OP_CALL method=%s url=%s outcome=%s status_code=%d duration_ms=%d',
+        method, url, outcome, sc, duration_ms,
+    )
 
 
 class OpenProjectClient:
@@ -44,14 +106,23 @@ class OpenProjectClient:
         Returns user info dict on success, None on failure.
         """
         headers = self._get_auth_header(api_key)
+        url = f"{self.api_base}/users/me"
+        start_ts = time.time()
 
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.get(
-                    f"{self.api_base}/users/me",
+                    url,
                     headers=headers,
                 )
+        except Exception as e:
+            _log_op_call("GET", url, start_ts, exc=e)
+            logger.error(f"API key verification error: {e}")
+            return None
 
+        _log_op_call("GET", url, start_ts, response=response)
+
+        try:
             if response.status_code == 200:
                 data = response.json()
                 user_info = {
@@ -142,15 +213,19 @@ class OpenProjectClient:
         # Make the API request with retry
         max_retries = 3
         last_error = None
+        wp_url = f"{self.api_base}/work_packages"
 
         for attempt in range(1, max_retries + 1):
+            start_ts = time.time()
+            response = None
             try:
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     response = await client.post(
-                        f"{self.api_base}/work_packages",
+                        wp_url,
                         headers=headers,
                         json=payload,
                     )
+                _log_op_call("POST", wp_url, start_ts, response=response)
 
                 if response.status_code in (200, 201):
                     data = response.json()
@@ -176,10 +251,15 @@ class OpenProjectClient:
                     )
                     last_error = f"HTTP {response.status_code}: {error_detail}"
 
-            except httpx.TimeoutException:
+            except httpx.TimeoutException as e:
+                _log_op_call("POST", wp_url, start_ts, exc=e)
                 logger.error(f"OpenProject request timeout (attempt {attempt})")
                 last_error = "Request timed out"
             except Exception as e:
+                # If the request itself didn't yield a response, log the exception;
+                # otherwise the response was already logged above.
+                if response is None:
+                    _log_op_call("POST", wp_url, start_ts, exc=e)
                 logger.error(f"OpenProject request failed (attempt {attempt}): {e}")
                 last_error = str(e)
 
@@ -273,13 +353,22 @@ class OpenProjectClient:
 
         try:
             logger.info(f"Uploading attachment ({len(file_data)} bytes) to ticket #{ticket_id}...")
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(
-                    f"{self.api_base}/work_packages/{ticket_id}/attachments",
-                    headers=headers,
-                    files=multipart_data
-                )
-                
+            attach_url = f"{self.api_base}/work_packages/{ticket_id}/attachments"
+            start_ts = time.time()
+            response = None
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    response = await client.post(
+                        attach_url,
+                        headers=headers,
+                        files=multipart_data
+                    )
+            except Exception as e:
+                _log_op_call("POST", attach_url, start_ts, exc=e)
+                raise
+
+            _log_op_call("POST", attach_url, start_ts, response=response)
+
             if response.status_code in (200, 201):
                 logger.info(f"✅ Attachment uploaded successfully to ticket #{ticket_id}")
                 return True
@@ -296,10 +385,15 @@ class OpenProjectClient:
 
     async def check_health(self) -> bool:
         """Check if OpenProject API is accessible."""
+        url = f"{self.api_base}/"
+        start_ts = time.time()
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(f"{self.api_base}/")
-            return response.status_code in (200, 401)  # 401 means API is up but needs auth
+                response = await client.get(url)
         except Exception as e:
+            _log_op_call("GET", url, start_ts, exc=e)
             logger.error(f"OpenProject health check failed: {e}")
             return False
+
+        _log_op_call("GET", url, start_ts, response=response)
+        return response.status_code in (200, 401)  # 401 means API is up but needs auth

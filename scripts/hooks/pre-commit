@@ -1,0 +1,35 @@
+#!/bin/sh
+
+if git rev-parse --verify HEAD >/dev/null 2>&1
+then
+    AGAINST=HEAD
+else
+    # Initial commit: diff against an empty tree object
+    AGAINST=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+fi
+
+SECRET_REGEX="\b(sk|pk|api|key|token)[-_][A-Za-z0-9]{16,}\b"
+
+FILES=$(git diff --cached --name-only --diff-filter=ACM $AGAINST)
+if [ -z "$FILES" ]; then
+    exit 0
+fi
+
+FAILED=0
+
+for FILE in $FILES; do
+    MATCHES=$(git diff --cached $AGAINST -- "$FILE" | grep '^+' | grep -v '^+++' | grep -E -i "$SECRET_REGEX" | grep -v 'REPLACE_WITH_' | grep -v '<single-line-token>')
+    
+    if [ ! -z "$MATCHES" ]; then
+        echo "ERROR: Potential secret committed in $FILE"
+        echo "$MATCHES"
+        FAILED=1
+    fi
+done
+
+if [ $FAILED -ne 0 ]; then
+    echo "Commit rejected. Please remove secrets or add them to allow-list."
+    exit 1
+fi
+
+exit 0
