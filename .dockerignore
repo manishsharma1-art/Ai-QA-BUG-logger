@@ -1,7 +1,8 @@
-# Ignore analysis/training data files (not needed in production)
+# Ignore bulky training data we don't need at runtime, but KEEP the
+# curated few-shot file because gemini_client._load_few_shot_block
+# reads it at startup to inject 5 reference examples into SYSTEM_PROMPT.
 training_data_raw.json
 training_examples.json
-training_examples_fewshot.json
 analyze_bugs.py
 extract_training.py
 bug_analysis_output.txt
@@ -21,4 +22,6 @@ __pycache__/
 .env
 venv/
 .venv/
-service-account.json
+# NOTE: service-account.json MUST NOT be in this file.
+# Same reason as .gcloudignore — Phase 2 needs it to download attachments
+# and send Chat replies.

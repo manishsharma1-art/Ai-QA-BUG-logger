@@ -284,6 +284,184 @@ BL=Buy Lead, LMS=Lead Manager, BMC=Buyer Message Centre, PDP=Product Detail Page
 
 
 # ─────────────────────────────────────────────
+# Few-shot examples — loaded once at import time (Theme 7 / audit-driven)
+# ─────────────────────────────────────────────
+# Source: assets/training_examples_fewshot.json (curated by extract_training.py
+# from 611 real OpenProject tickets). Each entry is a real ticket — its
+# `subject` and `description_raw` are exactly the format we want the LLM to
+# match. We render them as INPUT→JSON pairs so the LLM learns:
+#   - Title pattern: "[Feature] is not [working] on [screen]"
+#   - Step style: "Login as <user_id>" → "Navigate to ..." → "Observe that ..."
+#   - Field discipline: device/OS/environment ALWAYS populated, no placeholders
+#   - Priority calibration: ~95% Medium, High only for crashes / data loss
+# Capped at 5 examples (~3-4K tokens) to bound Phase 1 latency cost.
+
+import json as _json_for_loader
+from pathlib import Path as _Path
+import re as _re_for_loader
+
+
+def _synthesize_qa_brief(example: dict) -> str:
+    """
+    Real tickets only have output (subject + description). To make the
+    few-shot teach 'how to transform messy QA brief → structured JSON',
+    we synthesize the kind of compact brief a QA tester would actually type.
+    Pattern: subject (title-ish) + minimal device hint, like real /webhook
+    inputs we see in production logs.
+    """
+    subject = (example.get("subject") or "").strip()
+    desc = example.get("description_raw") or ""
+
+    # Extract device/OS from the test environment block if present.
+    dev = ""
+    m = _re_for_loader.search(
+        r"\*\*Device:?\*\*[:\s]*([A-Za-z0-9 ]+?)(?:\n|$|\*)",
+        desc,
+    )
+    if m:
+        dev = m.group(1).strip()
+    os_ver = ""
+    m = _re_for_loader.search(
+        r"\*\*Operating System:?\*\*[:\s]*([A-Za-z0-9 .]+?)(?:\n|$|\*)",
+        desc,
+    )
+    if m:
+        os_ver = m.group(1).strip()
+
+    parts = [subject]
+    hint_bits: list[str] = []
+    if dev:
+        hint_bits.append(dev)
+    if os_ver:
+        hint_bits.append(os_ver)
+    if hint_bits:
+        parts.append(" ".join(hint_bits))
+
+    return ". ".join(p for p in parts if p)
+
+
+def _format_example(example: dict) -> str:
+    """Render one example as INPUT→JSON pair for the few-shot block."""
+    qa_brief = _synthesize_qa_brief(example)
+    desc = example.get("description_raw") or ""
+
+    def _normalise(s: str) -> str:
+        """Decode common HTML entities and strip non-breaking-space artifacts
+        from the source data so the prompt is clean text."""
+        if not s:
+            return s
+        try:
+            import html as _html
+            s = _html.unescape(s)
+        except Exception:
+            pass
+        # Strip mojibake/non-breaking artifacts (â\xa0, ┬á, NBSP)
+        s = s.replace("\u00a0", " ").replace("\u2002", " ").replace("\u2003", " ")
+        s = s.replace("┬á", " ").replace("â\xa0", " ")
+        # Collapse runs of whitespace
+        s = _re_for_loader.sub(r"[ \t]+", " ", s).strip()
+        return s
+
+    # Pull actual_behavior, expected_behavior, steps_to_reproduce from the
+    # description_raw markdown so we can reconstruct the JSON the LLM
+    # SHOULD produce for this brief.
+    def _section(name: str) -> str:
+        m = _re_for_loader.search(
+            rf"###\s*\*+\s*{name}\s*[:\*]*\s*\n+(.*?)(?=\n###|\Z)",
+            desc, flags=_re_for_loader.DOTALL | _re_for_loader.IGNORECASE,
+        )
+        if not m:
+            return ""
+        body = m.group(1).strip()
+        # Strip leading ** wrapping that some entries have
+        body = body.strip("*").strip()
+        return _normalise(body)
+
+    actual = _section("Actual Behavior") or _normalise(example.get("subject", "Not specified"))
+    expected = _section("Expected Behavior") or "See actual behavior"
+    steps_raw = _section("Steps to reproduce")
+    # Steps are numbered like "1.  text" — split on numbered lines
+    steps = []
+    for line in steps_raw.splitlines():
+        line = line.strip()
+        m = _re_for_loader.match(r"^\d+\.\s*(.+)$", line)
+        if m:
+            steps.append(_normalise(m.group(1).strip()))
+    if not steps:
+        steps = ["See description for reproduction steps"]
+
+    # Device + OS extracted earlier
+    dev_match = _re_for_loader.search(
+        r"\*\*Device:?\*\*[:\s]*([A-Za-z0-9 ]+?)(?:\n|$|\*)", desc,
+    )
+    os_match = _re_for_loader.search(
+        r"\*\*Operating System:?\*\*[:\s]*([A-Za-z0-9 .]+?)(?:\n|$|\*)", desc,
+    )
+
+    output = {
+        "title": _normalise((example.get("subject") or ""))[:120],
+        "actual_behavior": actual[:400],
+        "expected_behavior": expected[:400],
+        "steps_to_reproduce": steps[:8],
+        "device": (dev_match.group(1).strip() if dev_match else "Not specified"),
+        "operating_system": (os_match.group(1).strip() if os_match else "Not specified"),
+        "environment": (example.get("environment") or "STAGE").upper(),
+        "app_version": "Not specified",
+        "bug_type": example.get("bug_type") or "Functional/Logical",
+        "priority": example.get("priority") or "Medium",
+        "logs_or_links": None,
+    }
+    return (
+        f"INPUT (QA brief):\n{qa_brief}\n\n"
+        f"OUTPUT (JSON):\n{_json_for_loader.dumps(output, ensure_ascii=False, indent=2)}"
+    )
+
+
+def _load_few_shot_block(max_examples: int = 5) -> str:
+    """Load curated few-shot examples and render as a prompt block.
+
+    Returns the formatted block (or empty string if the file is missing /
+    corrupt / empty). Never raises. Loaded once at module import time.
+    """
+    try:
+        path = _Path(__file__).parent / "assets" / "training_examples_fewshot.json"
+        if not path.exists():
+            return ""
+        raw = path.read_text(encoding="utf-8-sig")
+        examples = _json_for_loader.loads(raw)
+        if not isinstance(examples, list) or not examples:
+            return ""
+        # Filter out entries missing required fields (e.g. bug_type=None)
+        valid = [
+            e for e in examples
+            if e.get("bug_type") and e.get("priority") and e.get("subject")
+        ]
+        if not valid:
+            return ""
+        # Pick the first N — extract_training.py already de-duplicated by
+        # (project, bug_type, priority) for diversity.
+        chosen = valid[:max_examples]
+        rendered = [_format_example(e) for e in chosen]
+        block = (
+            "\n\n## REFERENCE EXAMPLES (real tickets — match this style and discipline)\n\n"
+            + "\n\n---\n\n".join(rendered)
+        )
+        logger.info(
+            "Few-shot loaded: %d examples (%d chars)",
+            len(chosen), len(block),
+        )
+        return block
+    except Exception as e:
+        # Never block startup on a malformed examples file.
+        logger.warning("Few-shot load failed (%s) — proceeding without examples", e)
+        return ""
+
+
+_FEW_SHOT_BLOCK = _load_few_shot_block(max_examples=5)
+SYSTEM_PROMPT = SYSTEM_PROMPT + _FEW_SHOT_BLOCK
+
+
+# ─────────────────────────────────────────────
 # Phase 2 — Media Enrichment Prompt
 # ─────────────────────────────────────────────
 # Template uses str.format() with `initial_json` and `original_brief` substitutions.
