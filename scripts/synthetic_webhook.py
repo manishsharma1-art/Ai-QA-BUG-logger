@@ -258,6 +258,13 @@ async def scenario_S9() -> None:
     call_args = await run_scenario("S9", make_payload("bug video description", True), 3, rep, asyncio.TimeoutError("timeout"))
     assert call_args[0][0] == rep
 
+
+async def scenario_S10() -> None:
+    # S10 - Retrieval path check
+    rep = get_base_report()
+    call_args = await run_scenario("S10", make_payload("[S10] Bug in RAG"), 3, rep, rep)
+    assert call_args[0][0] == rep
+
 SCENARIOS: dict[str, Callable[[], "asyncio.Future[None]"]] = {
     "S1": scenario_S1,
     "S2": scenario_S2,
@@ -268,6 +275,7 @@ SCENARIOS: dict[str, Callable[[], "asyncio.Future[None]"]] = {
     "S7": scenario_S7,
     "S8": scenario_S8,
     "S9": scenario_S9,
+    "S10": scenario_S10,
 }
 
 # ─────────────────────────────────────────────
