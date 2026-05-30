@@ -415,6 +415,10 @@ class HealthResponse(BaseModel):
         default=None,
         description="Build identifier emitted at startup (git-sha or build-time)."
     )
+    rag: Optional[dict] = Field(
+        default=None,
+        description="Retriever state snapshot — see bug_retriever.to_health_dict."
+    )
 
 
 class TicketCreatedResponse(BaseModel):

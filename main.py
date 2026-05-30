@@ -235,6 +235,38 @@ async def health_check():
     gcs_ok = gcs_sync is None or gcs_sync.outcome in ("ok", "skipped")
     is_healthy = db_ok and llm_ok and gcs_ok
 
+    # RAG retriever snapshot (Theme 4 / task 7.2). Never affects /health.status —
+    # retrieval degradation is best-effort and falls back to the static block.
+    rag_dict: Optional[dict] = None
+    try:
+        from bug_retriever import get_retriever
+        retriever = get_retriever()
+        if retriever is not None:
+            rag_dict = retriever.to_health_dict()
+        else:
+            rag_dict = {
+                "enabled": False,
+                "index_outcome": "disabled",
+                "corpus_size": 0,
+                "embedding_dim": 384,
+                "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+                "top_k": 5,
+                "cache_source": "none",
+            }
+    except ImportError:
+        rag_dict = {
+            "enabled": False,
+            "index_outcome": "disabled",
+            "corpus_size": 0,
+            "embedding_dim": 384,
+            "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+            "top_k": 5,
+            "cache_source": "none",
+        }
+    except Exception as _rag_health_err:
+        logger.warning("RAG health snapshot failed: %s", _rag_health_err)
+        rag_dict = None
+
     return HealthResponse(
         status="healthy" if is_healthy else "degraded",
         database="connected" if db_ok else "disconnected",
@@ -245,6 +277,7 @@ async def health_check():
         timestamp=datetime.now(timezone.utc).isoformat(),
         last_gcs_sync=gcs_sync_dict,
         build_marker=_build_marker or None,
+        rag=rag_dict,
     )
 
 @app.get("/logs")
