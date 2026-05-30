@@ -1,38 +1,103 @@
 # Token Consumption & Cost Analysis — QA Bug Logger Bot
 
-> **Scope:** per-bug LLM token consumption, monthly volume of 3,000 bugs, and rupee/dollar cost projection for the **current production line** (`qa-bugbot-00042-8zj`, asia-south1) and a **Phase 2 RAG-enabled projection** (branch `feat/rag-few-shot-retrieval`, paused for HOD review).
+> **Scope:** per-bug LLM token consumption (canonical case: **1 bug with a 25-second video**), monthly volume of 3,000 bugs, and rupee/dollar cost projection for the **current production line** (`qa-bugbot-00042-8zj`, asia-south1) and a **Phase 2 RAG-enabled projection** (branch `feat/rag-few-shot-retrieval`, paused for HOD review).
 >
 > **Last updated:** 2026-05-30
 > **Live revision audited:** `qa-bugbot-00042-8zj` → commit `5002f50` → tag `checkpoint-stable-20260530`
+> **Source of truth:** `scripts/cost_estimate.py` (run it to regenerate every number here).
 > **Pricing source:** Google Gemini 2.5 Flash public list price as of 2026-05 — input $0.30 / 1M tokens, output $2.50 / 1M tokens. Internal gateway `imllm.intermesh.net` resells at parity unless the team has a negotiated discount; numbers below are conservative upper bounds.
-> **Currency:** USD throughout. INR shown at ₹83 / USD (adjust as needed).
+> **Currency:** USD throughout. INR shown at ₹83 / USD (adjust via `USD_TO_INR` in the script).
 
 ---
 
-## TL;DR — what this costs today
+## 0. The matrix — token consumption for 1 bug (with a 25-second video)
 
-| Scenario | LLM calls per bug | Tokens per bug (in + out) | Cost per bug (USD) | 3,000 bugs/month (USD) | 3,000 bugs/month (INR) |
-|---|---:|---:|---:|---:|---:|
-| **Text-only bug** (Phase 1 only) | 1 | ~15,640 in + ~600 out | **~$0.0062** | **~$18.57** | **~₹1,541** |
-| **Bug with 1 screenshot** (Phase 1 + Phase 2) | 2 | ~36,560 in + ~3,500 out | **~$0.0210** | **~$62.84** | **~₹5,216** |
-| **Bug with 1 short video** (Phase 1 + Phase 2 + 20 frames) | 2 | ~70,580 in + ~3,500 out | **~$0.0306** | **~$91.83** | **~₹7,622** |
-| **Bug needing LLM bucket fallback** (rare, ~5% of text-only) | 2 | ~15,740 in + ~620 out | **~$0.0063** | (small delta) | (small delta) |
-| **Weighted blended monthly cost** (60% text, 25% screenshot, 15% video; 5% retry buffer) | — | — | **~$0.0143** | **~$42.79** | **~₹3,552** |
+This is the canonical reference case: **one bug report that includes a 25-second screen-recording**, the heaviest common workload. A 25 s video extracts **20 frames** (the code caps at `num_frames = min(int(duration_sec), 20)`, so any video ≥ 20 s yields exactly 20 frames). It runs **both** LLM phases: Phase 1 (text) then Phase 2 (text + 20 video frames).
 
-**Phase 2 (RAG) projection — same 3,000 bugs/month with 5 retrieved examples instead of 50-example static block**
+### Current production (`qa-bugbot-00042-8zj`, 50-example static few-shot)
 
-| Scenario | Tokens per bug (in + out) | Cost per bug (USD) | 3,000 bugs/month (USD) | Savings vs current |
-|---|---:|---:|---:|---:|
-| Text-only bug | ~2,440 in + ~600 out | **~$0.0022** | **~$6.69** | **~$11.88 / ₹986 / 64% cheaper** |
-| Bug with screenshot | ~23,360 in + ~3,500 out | **~$0.0130** | **~$39.10** | **~$23.74 / ₹1,970 / 38% cheaper** |
-| Bug with video (20 frames) | ~57,380 in + ~3,500 out | **~$0.0227** | **~$68.07** | **~$23.76 / ₹1,972 / 26% cheaper** |
-| **Weighted blended monthly cost** | — | **~$0.0084** | **~$25.33** | **~$17.46 / ₹1,449 / 41% cheaper** |
+| # | Line item | Phase | Direction | Tokens |
+|---|---|---|---|---:|
+| 1 | System prompt rules + JSON schema (`SYSTEM_PROMPT_BASE`) | 1 | input | 850 |
+| 2 | Few-shot block (50 curated tickets) | 1 | input | 14,700 |
+| 3 | User-message wrapper | 1 | input | 20 |
+| 4 | QA brief (median ~280 chars) | 1 | input | 70 |
+| 5 | JSON-mode overhead | 1 | input | 20 |
+| 6 | **Phase 1 input subtotal** | 1 | input | **15,660** |
+| 7 | Phase 1 JSON response | 1 | output | 600 |
+| 8 | System prompt + few-shot block (reused) | 2 | input | 15,550 |
+| 9 | Phase 2 enrichment + screening template | 2 | input | 2,200 |
+| 10 | Phase 1 result JSON (passed as context) | 2 | input | 400 |
+| 11 | Original brief (reused) | 2 | input | 70 |
+| 12 | **Phase 2 text input subtotal** | 2 | input | **18,220** |
+| 13 | 20 video frames × 1,700 tokens/frame | 2 | input | 34,000 |
+| 14 | **Phase 2 input total** (12 + 13) | 2 | input | **52,220** |
+| 15 | Phase 2 enriched JSON response | 2 | output | 3,500 |
+| | **TOTAL INPUT TOKENS** (6 + 14) | | input | **67,880** |
+| | **TOTAL OUTPUT TOKENS** (7 + 15) | | output | **4,100** |
+| | **GRAND TOTAL TOKENS** | | both | **71,980** |
 
-**Bottom line:** at 3,000 bugs/month the bot consumes roughly **140–150 million Gemini 2.5 Flash tokens** today. That costs about **$42.79 / ₹3,552 per month**. Phase 2 (RAG) trims roughly **$17 / ₹1,450 per month (~41%)** while making prompts more accurate. (Numbers reproducible via `python scripts/cost_estimate.py`.)
+**Cost for this one bug:**
+
+| | Tokens | Rate (USD / 1M) | Cost (USD) |
+|---|---:|---:|---:|
+| Input | 67,880 | $0.30 | $0.020364 |
+| Output | 4,100 | $2.50 | $0.010250 |
+| **Per bug** | **71,980** | — | **$0.03061  (≈ ₹2.54)** |
+
+### Phase 2 — RAG branch (`feat/rag-few-shot-retrieval`, 5 retrieved examples)
+
+Only the few-shot block shrinks (lines 2 and 8: 14,700 → 1,500). The 34,000 video-frame tokens are identical — RAG does not touch image input.
+
+| | Tokens | Cost (USD) |
+|---|---:|---:|
+| Phase 1 input | 2,460 | — |
+| Phase 1 output | 600 | — |
+| Phase 2 text input | 5,020 | — |
+| Phase 2 video frames | 34,000 | — |
+| Phase 2 output | 3,500 | — |
+| **TOTAL input** | **41,480** | $0.012444 |
+| **TOTAL output** | **4,100** | $0.010250 |
+| **Per bug** | **45,580** | **$0.02269  (≈ ₹1.88)** |
+
+### Side-by-side (1 bug, 25 s video)
+
+| Metric | Current production | RAG (Phase 2) | Saving |
+|---|---:|---:|---:|
+| Total tokens | 71,980 | 45,580 | −26,400 (−37%) |
+| Cost per bug (USD) | $0.03061 | $0.02269 | −$0.00792 |
+| Cost per bug (INR) | ₹2.54 | ₹1.88 | −₹0.66 |
+| **× 3,000 such bugs/month** | **$91.84 / ₹7,623** | **$68.08 / ₹5,651** | **−$23.76 / ₹1,972 (−26%)** |
+
+> All figures above are produced by `python scripts/cost_estimate.py` — that script is the source of truth for this document.
 
 ---
 
-## 1. Calls made per bug — current production
+## 1. Token consumption matrix — all bug shapes
+
+Not every bug carries a 25 s video. Here is the full matrix across the four real bug shapes, both prompt regimes. The video row is the canonical case from §0.
+
+### Current production (50-example static few-shot)
+
+| Bug shape | Phase 1 input | Phase 1 out | Phase 2 input | Phase 2 out | Total tokens | Cost/bug (USD) | Cost/bug (INR) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Text-only (no media) | 15,660 | 600 | — | — | 16,260 | $0.00619 | ₹0.51 |
+| + 1 screenshot | 15,660 | 600 | 20,020 | 3,500 | 39,780 | $0.02095 | ₹1.74 |
+| + 1 video (25 s → 20 frames) | 15,660 | 600 | 52,220 | 3,500 | 71,980 | $0.03061 | ₹2.54 |
+| + screenshot **and** video | 15,660 | 600 | 54,020 | 3,500 | 73,780 | $0.03115 | ₹2.59 |
+
+### Phase 2 — RAG branch (5 retrieved examples)
+
+| Bug shape | Phase 1 input | Phase 1 out | Phase 2 input | Phase 2 out | Total tokens | Cost/bug (USD) | Cost/bug (INR) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Text-only (no media) | 2,460 | 600 | — | — | 3,060 | $0.00223 | ₹0.19 |
+| + 1 screenshot | 2,460 | 600 | 6,820 | 3,500 | 13,380 | $0.01303 | ₹1.08 |
+| + 1 video (25 s → 20 frames) | 2,460 | 600 | 39,020 | 3,500 | 45,580 | $0.02269 | ₹1.88 |
+| + screenshot **and** video | 2,460 | 600 | 40,820 | 3,500 | 47,380 | $0.02323 | ₹1.93 |
+
+---
+
+## 2. Calls made per bug — current production
 
 Audited from `gemini_client.py` and `main.py` on commit `5002f50` (live `qa-bugbot-00042-8zj`).
 
@@ -47,9 +112,9 @@ The hot path for 95%+ of bugs is **Phase 1, sometimes Phase 2**. Bucket fallback
 
 ---
 
-## 2. Token accounting — Phase 1 (text-only)
+## 3. Token accounting — Phase 1 (text-only)
 
-Tokens are estimated per OpenAI/Gemini convention of ~4 chars/token for English. Numbers come from reading the prompt template directly, not measurement (today's `_log_llm_call` records `chars=`, not `prompt_tokens`/`completion_tokens` — see §6 for the recommended fix).
+Tokens are estimated per OpenAI/Gemini convention of ~4 chars/token for English. Numbers come from reading the prompt template directly, not measurement (today's `_log_llm_call` records `chars=`, not `prompt_tokens`/`completion_tokens` — see §11 for the recommended fix).
 
 | Component | Approx chars | Approx tokens (input) |
 |---|---:|---:|
@@ -70,7 +135,7 @@ phase 1 total                            ≈ $0.00654 per bug
 
 ---
 
-## 3. Token accounting — Phase 2 (with media)
+## 4. Token accounting — Phase 2 (with media)
 
 Phase 2 reuses the same system prompt + few-shot block, then adds the Phase 1 JSON output as context, the original brief, and the media items themselves.
 
@@ -113,21 +178,23 @@ phase 2 total                         ≈ $0.02496 per bug
 
 ---
 
-## 4. Per-bug totals — current production
+## 5. Per-bug cost detail — current production
+
+(Token counts are in the §1 matrix; this table shows the cost arithmetic.)
 
 | Bug shape | Phase 1 ($) | Phase 2 ($) | **Total ($)** | INR @ 83 |
 |---|---:|---:|---:|---:|
 | Text-only | 0.00619 | — | **0.00619** | ~₹0.51 |
 | With 1 screenshot | 0.00619 | 0.01476 | **0.02095** | ~₹1.74 |
-| With 1 short video (20 frames) | 0.00619 | 0.02442 | **0.03061** | ~₹2.54 |
-| Screenshot + short video | 0.00619 | 0.02496 | **0.03115** | ~₹2.59 |
+| With 1 video (25 s → 20 frames) | 0.00619 | 0.02442 | **0.03061** | ~₹2.54 |
+| Screenshot + video | 0.00619 | 0.02496 | **0.03115** | ~₹2.59 |
 | Text + LLM bucket fallback | 0.00619 + 0.00012 | — | **0.00631** | ~₹0.52 |
 
-Note: Phase 1 is `15,640 input × $0.30/M + 600 output × $2.50/M = $0.00469 + $0.00150 = $0.00619`. The 4-chars/token rule introduces ±10% on the input total — the script in §11 is the source of truth.
+Worked example for the text-only Phase 1 cost: `15,660 input × $0.30/M + 600 output × $2.50/M = $0.004698 + $0.001500 = $0.006198`. The 4-chars/token rule introduces ±10% on the input total — `scripts/cost_estimate.py` is the source of truth.
 
 ---
 
-## 5. Monthly cost at 3,000 bugs
+## 6. Monthly cost at 3,000 bugs
 
 Bug-shape mix is observable from existing OpenProject ticket history. Use these as defaults until live measurements refine them:
 
@@ -151,7 +218,7 @@ For reference at other volumes (linear with bug count, roughly):
 
 ---
 
-## 6. What the bot does NOT pay for
+## 7. What the bot does NOT pay for
 
 Useful framing if anyone asks "is this all the cost":
 
@@ -167,7 +234,7 @@ So **infra cost is essentially $5–10/month flat**. LLM tokens dominate; that i
 
 ---
 
-## 7. Phase 2 (RAG) projection — same volume, smaller prompts
+## 8. Phase 2 (RAG) projection — same volume, smaller prompts
 
 The RAG branch (`feat/rag-few-shot-retrieval`, tag `rag-phase2-checkpoint-20260530`) replaces the static 50-example few-shot block (~14,700 tokens) with **5 retrieved examples** (~1,500 tokens). The cost delta per call is therefore:
 
@@ -194,7 +261,7 @@ Image tokens (screenshots, video frames) are unchanged by RAG; the few-shot bloc
 
 ---
 
-## 8. Sensitivity to volume and bug-shape mix
+## 9. Sensitivity to volume and bug-shape mix
 
 What changes the monthly bill the most, in order of impact:
 
@@ -213,92 +280,60 @@ If the HOD asks "what if bug volume scales 5×":
 
 ---
 
-## 9. Validity caveats and known gaps
+## 10. Validity caveats and known gaps
 
 | Caveat | Impact on numbers |
 |---|---|
-| Token estimates use the 4-chars/token rule of thumb | ±10% on text token counts. Real token counts depend on Gemini's tokenizer; will be measurable once §10 lands. |
+| Token estimates use the 4-chars/token rule of thumb | ±10% on text token counts. Real token counts depend on Gemini's tokenizer; will be measurable once §11 lands. |
 | Image token costs use Google's published "tile" model | Mobile screenshots, real image content, and video frames may price slightly differently. ±15% on Phase 2 image costs. |
 | Internal gateway (`imllm.intermesh.net`) is assumed to resell at list price | If the team has a negotiated discount, the dollar numbers should be discounted by that factor; the relative shape (text vs media, current vs RAG) is unchanged. |
 | Brief lengths skew right | Long-tail briefs (>1,000 chars) raise per-bug input by ~250 tokens, ~$0.0001 per bug. Negligible at 3,000-bug scale. |
 | Output truncation at `max_tokens=1000` (Phase 1) and `max_tokens=6000` (Phase 2) | Caps the worst case. Output tokens almost never hit the cap in production logs. |
-| Bug-shape mix (60/25/15) is an assumption | Trivial to recompute once a real distribution is dropped in §5. |
-| Retry / fall-back path (Phase 2 truncation, timeout, default-stuffing) | Each adds ~0.4× a Phase 1 call. Modeled as a flat 5% buffer in §5 (~$2/month at 3,000 bugs). |
+| Bug-shape mix (60/25/15) is an assumption | Trivial to recompute once a real distribution is dropped in §6. |
+| Retry / fall-back path (Phase 2 truncation, timeout, default-stuffing) | Each adds ~0.4× a Phase 1 call. Modeled as a flat 5% buffer in §6 (~$2/month at 3,000 bugs). |
 
 ---
 
-## 10. Action item — capture real token usage in `LLM_CALL`
+## 11. Action item — capture real token usage in `LLM_CALL`
 
 Today's structured log line records `chars=<N>` (response character count) but does NOT record `response.usage.prompt_tokens` or `response.usage.completion_tokens`. That's a one-line fix in `gemini_client.py:_log_llm_call` and its call sites:
 
 - Pull `response.usage.prompt_tokens` and `response.usage.completion_tokens` after each call.
 - Log them as `prompt_tokens=<N> completion_tokens=<N>` in the `LLM_CALL` extra fields.
-- Aggregate over a 7-day window via `/logs` to replace the estimates in §2 and §3 with measured numbers.
+- Aggregate over a 7-day window via `/logs` to replace the estimates in §3 and §4 with measured numbers.
 
 This unblocks:
 - **Per-call cost telemetry** (real $/bug)
-- **A/B verification** of the RAG savings projected in §7 (one of the items the HOD will probably want before approving the deploy gate)
+- **A/B verification** of the RAG savings projected in §8 (one of the items the HOD will probably want before approving the deploy gate)
 - **Anomaly alerts** if a single bug suddenly burns 50× the expected token count (broken corpus, runaway prompt, accidental K=999)
 
 This is queued as a follow-up for the same RAG branch — it's a tiny edit that rides along with the deploy when the gate clears.
 
 ---
 
-## 11. Reproducible methodology
+## 12. Reproducible methodology
 
-To recompute these numbers from scratch:
+Every number in this document is produced by **`scripts/cost_estimate.py`**. That script is the single source of truth — this markdown is a snapshot of its output. To recompute:
 
-```python
-# Token rates (Gemini 2.5 Flash, list price as of 2026-05)
-INPUT_PER_M  = 0.30   # USD / 1M input tokens
-OUTPUT_PER_M = 2.50   # USD / 1M output tokens
-
-# Component sizes (audited from gemini_client.py at commit 5002f50)
-SYSTEM_PROMPT_BASE_TOK = 850
-FEW_SHOT_TOK_STATIC    = 14700   # 50 examples, current production
-FEW_SHOT_TOK_RAG       = 1500    # 5 retrieved examples, Phase 2 branch
-PHASE2_TEMPLATE_TOK    = 2200
-P1_RESULT_JSON_TOK     = 400
-USER_BRIEF_TOK         = 70      # median; long tail adds ~250 tok
-JSON_MODE_OVERHEAD_TOK = 20
-
-# Per-call totals
-P1_INPUT  = SYSTEM_PROMPT_BASE_TOK + FEW_SHOT_TOK_STATIC + USER_BRIEF_TOK + JSON_MODE_OVERHEAD_TOK
-P1_OUTPUT = 600   # capped at max_tokens=1000
-
-P2_TEXT_INPUT_BASE = (
-    SYSTEM_PROMPT_BASE_TOK + FEW_SHOT_TOK_STATIC + PHASE2_TEMPLATE_TOK
-    + P1_RESULT_JSON_TOK + USER_BRIEF_TOK
-)
-SCREENSHOT_TOK = 1800     # one mobile screenshot
-VIDEO_FRAME_TOK = 1700    # per extracted frame
-P2_OUTPUT = 3500          # capped at max_tokens=6000
-
-def cost_per_call(in_tok, out_tok):
-    return in_tok * INPUT_PER_M / 1_000_000 + out_tok * OUTPUT_PER_M / 1_000_000
-
-# Bug shapes
-text_only        = cost_per_call(P1_INPUT, P1_OUTPUT)
-screenshot       = text_only + cost_per_call(P2_TEXT_INPUT_BASE + SCREENSHOT_TOK,
-                                             P2_OUTPUT)
-video_20_frames  = text_only + cost_per_call(P2_TEXT_INPUT_BASE + 20 * VIDEO_FRAME_TOK,
-                                             P2_OUTPUT)
-
-monthly = (0.60 * 3000 * text_only
-         + 0.25 * 3000 * screenshot
-         + 0.15 * 3000 * video_20_frames) * 1.05  # 5% retry/fall-back buffer
-
-print(f"Per text-only bug:   ${text_only:.5f}")
-print(f"Per screenshot bug:  ${screenshot:.5f}")
-print(f"Per video bug:       ${video_20_frames:.5f}")
-print(f"3000-bug month total: ${monthly:.2f} USD = ₹{monthly*83:.0f}")
+```bash
+python scripts/cost_estimate.py
 ```
 
-Drop this into a Python REPL or a one-off script under `scripts/cost_estimate.py` and rerun whenever (a) the prompt structure changes, (b) the few-shot block size changes, (c) the bug-shape mix is updated from real data.
+The script prints (a) the line-item matrix for the canonical 25 s-video bug under both prompt regimes, (b) the all-shapes per-bug table, and (c) the weighted monthly total plus the RAG delta.
+
+Edit the constants at the top of the script and rerun whenever:
+- Gemini pricing changes (`INPUT_PER_M`, `OUTPUT_PER_M`)
+- The prompt structure changes (`SYSTEM_PROMPT_BASE_TOK`, `PHASE2_TEMPLATE_TOK`, etc.)
+- The few-shot block size changes (`FEW_SHOT_TOK_STATIC`, `FEW_SHOT_TOK_RAG`)
+- The average video length changes (`AVG_VIDEO_SECONDS` — note the 20-frame cap means anything ≥ 20 s is identical)
+- The bug-shape mix is updated from real OpenProject data (`SHARE_TEXT_ONLY`, `SHARE_SCREENSHOT`, `SHARE_VIDEO`)
+- The INR rate moves (`USD_TO_INR`)
+
+Key code fact the script encodes: `num_frames = min(int(duration_sec), 20)` in `main.py` — so a 25 s video extracts exactly 20 frames, and per-bug video token cost is flat for any clip ≥ 20 s.
 
 ---
 
-## 12. Summary for the HOD meeting
+## 13. Summary for the HOD meeting
 
 - The bot turns ~3,000 bugs/month into ~140–150 million Gemini 2.5 Flash tokens.
 - That costs **~₹3,552/month** today, or **~₹1.18 per bug**.
