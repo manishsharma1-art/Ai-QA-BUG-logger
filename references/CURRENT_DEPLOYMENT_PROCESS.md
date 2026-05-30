@@ -1,336 +1,238 @@
-# 📋 Current Deployment Process Analysis
+# 📋 Current Deployment Process
 
-## Deployment Information
+> _Updated 2026-05-30 after the v3 reliability deploy went live. The canonical deploy reference._
 
-### Current Service Details
-- **Service Name:** `qa-bugbot`
-- **Region:** `asia-south1`
-- **Project ID:** `artful-affinity-634`
-- **Service Account:** `qaautomation@artful-affinity-634.iam.gserviceaccount.com`
-- **Current URL:** `https://qa-bugbot-542857204182.asia-south1.run.app`
-- **Alternative URL:** `https://qa-bugbot-mh76wysxxa-el.a.run.app`
+---
 
-### Current Configuration
+## Service Details (live)
+
+| | Value |
+|---|---|
+| **Service Name** | `qa-bugbot` |
+| **Region** | `asia-south1` |
+| **Project ID** | `artful-affinity-634` |
+| **Service Account** | `qaautomation@artful-affinity-634.iam.gserviceaccount.com` |
+| **Live URL** | `https://qa-bugbot-542857204182.asia-south1.run.app` |
+| **Internal alias URL** | `https://qa-bugbot-mh76wysxxa-el.a.run.app` |
+| **Current Revision** | `qa-bugbot-00042-8zj` (100% traffic) |
+| **Stable git checkpoint** | `checkpoint-stable-20260530` → commit `5002f50` |
+
+The OLD `https://qa-bug-bot-542857204182.us-central1.run.app/...` URL is a dead deployment in a different region. Don't probe it.
+
+---
+
+## Production Configuration
+
 ```yaml
 Resources:
-  CPU: 1000m (1 vCPU)
-  Memory: 512Mi
-  Timeout: 300 seconds (5 minutes)
-  
+  CPU:          1 (1000m)
+  Memory:       1Gi              # was 512Mi; bumped for OpenCV video processing
+  Timeout:      300s
+  CPU throttling: false           # MANDATORY — Phase 2 background tasks die without this
+  CPU boost:    true              # for fast cold starts
+
 Scaling:
-  Min Instances: 1
-  Max Instances: 100
-  Concurrency: 80
-  
+  Min instances: 1               # avoids cold-start hits during demos
+  Max instances: 100
+  Concurrency:   80
+
 Container:
-  Port: 8080
+  Port:  8080
   Image: asia-south1-docker.pkg.dev/artful-affinity-634/cloud-run-source-deploy/qa-bugbot
-  
-Environment Variables:
-  - LLM_API_KEY: sk-KNy4qPAxAw0OEvgZuNyOeA
-  - LLM_BASE_URL: https://imllm.intermesh.net/v1
-  - LLM_MODEL: google/gemini-2.5-flash
-  - OPENPROJECT_BASE_URL: https://project.intermesh.net
-  - GOOGLE_SERVICE_ACCOUNT_JSON: service-account.json
+
+Environment Variables (set via --update-env-vars on each deploy):
+  LLM_API_KEY:                  <gateway token, in .env, NEVER in repo>
+  LLM_BASE_URL:                 https://imllm.intermesh.net/v1
+  LLM_MODEL:                    google/gemini-2.5-flash
+  OPENPROJECT_BASE_URL:         https://project.intermesh.net
+  GOOGLE_SERVICE_ACCOUNT_JSON:  service-account.json
+  DATABASE_URL:                 sqlite+aiosqlite:///./data/qa_bugbot.db
+  PORT:                         8080
+  DEFAULT_OPENPROJECT_API_KEY:  <demo space fallback key, NEVER in repo>
+  DEMO_SPACE_ID:                <Google Chat space ID, NEVER in repo>
+  BUILD_MARKER:                 <git short sha — set per deploy>
 ```
 
-### Recent Deployment History
-```
-Revision 10 (ACTIVE): 2026-05-13 07:15:44 UTC
-Revision 09:          2026-05-13 07:00:43 UTC
-Revision 08:          2026-05-13 06:50:49 UTC
-Revision 07:          2026-05-13 06:26:12 UTC
-Revision 06:          2026-05-13 05:51:50 UTC
-```
-
-**Note:** Multiple deployments today (5 revisions in ~2 hours) suggests active development/debugging.
+**Critical:** `--update-env-vars` value MUST be **comma-separated**, not space-separated. The space-separator concatenates `DEMO_SPACE_ID=...` into the API key value (this was RC2 in the production-reliability spec).
 
 ---
 
-## Deployment Method Analysis
+## Deploy Method: Cloud Build from Source
 
-### Method Used: Cloud Build from Source
+Cloud Run's `--source .` flag runs Cloud Build implicitly. There is NO separate `gcloud builds submit` step in this project's workflow. The Dockerfile in the repo root drives the build.
 
-Based on the service metadata, the current deployment uses **Cloud Build from source** (not Docker):
-
+Service metadata that confirms this:
 ```yaml
-annotations:
-  run.googleapis.com/build-enable-automatic-updates: 'false'
-  run.googleapis.com/build-id: 2e574cc9-6d3e-4d09-b6a8-17b459d67e69
-  run.googleapis.com/build-source-location: gs://run-sources-artful-affinity-634-asia-south1/services/qa-bugbot/...
+run.googleapis.com/build-source-location:
+  gs://run-sources-artful-affinity-634-asia-south1/services/qa-bugbot/...
 ```
-
-This means deployments are done using:
-```bash
-gcloud run deploy qa-bugbot --source .
-```
-
-**NOT** using Docker build/push/deploy workflow.
 
 ---
 
-## Deployment Workflow (Current)
+## Deploy Workflow (Canonical)
 
-### Step 1: Prepare Code
-```bash
-# Navigate to project directory
+### 1. Pre-deploy checks (local)
+
+```powershell
 cd C:\Users\Imart\Documents\QA_BUG_Logger
 
-# Ensure .env file has correct values
-# Ensure service-account.json exists
+# Working tree clean
+git status --porcelain   # MUST be empty
+
+# Tests green
+python -m pytest tests/unit -q                               # expect 190 passed
+python scripts/synthetic_webhook.py --scenario all          # expect 9/9 passed
+
+# .env has the right values
+# service-account.json exists at repo root (gitignored, but uploaded with --source)
 ```
 
-### Step 2: Deploy from Source
-```bash
-gcloud run deploy qa-bugbot \
-  --source . \
-  --region asia-south1 \
-  --platform managed \
-  --allow-unauthenticated \
-  --memory 512Mi \
-  --cpu 1 \
-  --min-instances 1 \
-  --max-instances 100 \
-  --timeout 300 \
-  --no-cpu-throttling \
-  --set-env-vars "LLM_API_KEY=sk-KNy4qPAxAw0OEvgZuNyOeA" \
-  --set-env-vars "LLM_BASE_URL=https://imllm.intermesh.net/v1" \
-  --set-env-vars "LLM_MODEL=google/gemini-2.5-flash" \
-  --set-env-vars "OPENPROJECT_BASE_URL=https://project.intermesh.net" \
-  --set-env-vars "GOOGLE_SERVICE_ACCOUNT_JSON=service-account.json"
+### 2. Tag the candidate
+
+```powershell
+$today = Get-Date -Format "yyyyMMdd-HHmm"
+$next  = "v?"   # next release version
+git tag -a "reliability-fix-$next-$today" -m "<release notes>"
+git push origin fix/production-reliability "reliability-fix-$next-$today"
 ```
 
-### What Happens:
-1. **gcloud** uploads source code to Cloud Storage
-2. **Cloud Build** automatically builds Docker image from Dockerfile
-3. **Cloud Build** pushes image to Artifact Registry
-4. **Cloud Run** deploys the new image
-5. **Traffic** switches to new revision
+### 3. Deploy from source
 
----
+```powershell
+$sha = git rev-parse --short HEAD
 
-## Key Files for Deployment
-
-### Required Files
-1. ✅ `Dockerfile` - Container build instructions
-2. ✅ `.dockerignore` - Files to exclude from build
-3. ✅ `requirements.txt` - Python dependencies
-4. ✅ `service-account.json` - Google Chat API credentials
-5. ✅ `.env` - Environment variables (local only)
-
-### Deployment Scripts (Available but NOT currently used)
-1. `deploy_fixes.sh` - Linux/Mac deployment script (Docker-based)
-2. `deploy_fixes.bat` - Windows deployment script (Docker-based)
-
-**Note:** These scripts use Docker build/push workflow, which is different from the current source-based deployment.
-
----
-
-## Environment Variables
-
-### Set via gcloud command:
-```bash
-LLM_API_KEY=sk-KNy4qPAxAw0OEvgZuNyOeA
-LLM_BASE_URL=https://imllm.intermesh.net/v1
-LLM_MODEL=google/gemini-2.5-flash
-OPENPROJECT_BASE_URL=https://project.intermesh.net
-GOOGLE_SERVICE_ACCOUNT_JSON=service-account.json
+gcloud run deploy qa-bugbot `
+    --source . `
+    --region asia-south1 `
+    --no-cpu-throttling `
+    --memory 1Gi `
+    --cpu 1 `
+    --timeout 300 `
+    --min-instances 1 `
+    --max-instances 100 `
+    --service-account qaautomation@artful-affinity-634.iam.gserviceaccount.com `
+    --update-env-vars "BUILD_MARKER=$sha,DEFAULT_OPENPROJECT_API_KEY=<key>,DEMO_SPACE_ID=<id>"
 ```
 
-### NOT set (uses defaults from config.py):
-- `DATABASE_URL` - Defaults to `sqlite+aiosqlite:///./data/qa_bugbot.db`
-- `PORT` - Defaults to `8080`
+Cloud Build phase takes ~3-5 minutes. The deploy will print the new revision name (e.g. `qa-bugbot-00042-8zj`) in its final line.
 
----
+### 4. Force traffic flip if needed
 
-## Service Account & Permissions
+A new revision is created with **0% traffic** when traffic was previously pinned to a specific revision. Force it:
 
-### Service Account
-- **Email:** `qaautomation@artful-affinity-634.iam.gserviceaccount.com`
-- **File:** `service-account.json` (in project root)
-
-### Required Permissions
-- Google Chat API access (for sending messages, downloading attachments)
-- Cloud Run deployment permissions
-- Cloud Build permissions
-
----
-
-## Monitoring & Logs
-
-### View Logs
-```bash
-# Recent logs
-gcloud run services logs read qa-bugbot --region asia-south1 --limit 50
-
-# Stream logs
-gcloud run services logs tail qa-bugbot --region asia-south1
-
-# Filter by severity
-gcloud run services logs read qa-bugbot --region asia-south1 --log-filter="severity>=ERROR"
+```powershell
+gcloud run services update-traffic qa-bugbot `
+    --region asia-south1 `
+    --to-revisions=<new-revision-name>=100
 ```
 
-### Health Check
-```bash
+### 5. Verify
+
+```powershell
+# /health: status=healthy, gemini=ok, last_gcs_sync.outcome=ok
 curl https://qa-bugbot-542857204182.asia-south1.run.app/health
+
+# Logs: BUILD_MARKER, ENV_VALIDATION, GCS_SYNC, LLM_CALL all present
+gcloud run services logs read qa-bugbot --region asia-south1 --limit 200 |
+    Select-String -Pattern "BUILD_MARKER|ENV_VALIDATION|GCS_SYNC|LLM_CALL"
+```
+
+Or query `/logs` directly (works without `roles/logging.viewer`):
+```powershell
+curl https://qa-bugbot-542857204182.asia-south1.run.app/logs
+```
+
+### 6. Send the canary bug
+
+In the dev Google Chat space:
+```
+[LMS Webview] login button broken on iPhone 13
+```
+
+Expected reply:
+- `Project: LMS Webview` (NOT `ANDROID`)
+- `Bug Type: Functional/Logical`
+- `Priority: Medium` (95% rule; "broken" alone isn't a crash)
+- No `Platform:` line (intentional)
+- View URL points at OpenProject ticket
+- Processed in ~4-5 seconds
+
+### 7. Mint a stable checkpoint (only if green)
+
+```powershell
+git tag -a "checkpoint-stable-$today" -m "<release context>" HEAD
+git push origin "checkpoint-stable-$today"
 ```
 
 ---
 
-## Differences: Documentation vs Reality
+## Rollback
 
-### Documentation Says (DEPLOYMENT.md):
-```bash
-# Build Docker image locally
-docker build -t qa-bugbot .
-docker tag qa-bugbot gcr.io/PROJECT_ID/qa-bugbot:latest
-docker push gcr.io/PROJECT_ID/qa-bugbot:latest
-gcloud run deploy qa-bugbot --image gcr.io/PROJECT_ID/qa-bugbot:latest
+### Cloud Run traffic flip — fastest, ~30s, no rebuild
+
+```powershell
+gcloud run services update-traffic qa-bugbot `
+    --region asia-south1 `
+    --to-revisions=qa-bugbot-00042-8zj=100
 ```
 
-### Reality (Current Practice):
-```bash
-# Deploy from source (no local Docker build)
-gcloud run deploy qa-bugbot --source .
+This revision (`qa-bugbot-00042-8zj`) is the current stable target. If you've deployed past this and want to revert: pick the most recent revision before the deploy that broke things from `gcloud run revisions list --service qa-bugbot --region asia-south1`.
+
+### Source-code rollback
+
+```powershell
+git fetch origin
+git checkout fix/production-reliability
+git reset --hard checkpoint-stable-20260530
+git push --force-with-lease origin fix/production-reliability
 ```
 
-**Why the difference?**
-- Source-based deployment is simpler (no Docker installation needed)
-- Cloud Build handles everything automatically
-- Faster iteration during development
-- No need to manage Docker images locally
+Then redeploy from `--source .`.
 
 ---
 
-## Deployment Best Practices (Current Setup)
+## Deploy gotchas (each one cost us a deploy attempt)
 
-### ✅ Advantages
-1. **Simple:** Single command deployment
-2. **Fast:** No local Docker build time
-3. **Consistent:** Cloud Build ensures reproducible builds
-4. **Automatic:** Image management handled by Google
-
-### ⚠️ Considerations
-1. **Build time:** Cloud Build takes 2-3 minutes
-2. **Cost:** Cloud Build charges apply (minimal for this project)
-3. **Dependencies:** Requires gcloud CLI configured
-4. **Source upload:** Entire directory uploaded (respects .dockerignore)
+1. **`service-account.json` must be in the source upload.** Don't add it to `.gcloudignore` or `.dockerignore`. It's already in `.gitignore`.
+2. **`--update-env-vars` requires comma separation.** Spaces concatenate values into the previous key. RC2.
+3. **Cloud Run does NOT auto-flip traffic** when traffic was previously pinned. Always run `update-traffic` after `deploy` if you've previously rolled back.
+4. **The vendored `gcloud_sdk/` in the repo is broken** (missing Python deps). Use a system gcloud install (`C:\Program Files (x86)\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd`).
+5. **Pre-commit hook may reject test files** that contain literal-looking secrets (e.g. `sk-fakefake...`). Construct such strings at runtime in tests.
 
 ---
 
-## Recommended Deployment Command (For Fixes)
+## Image build details
 
-```bash
-# From project root directory
-gcloud run deploy qa-bugbot \
-  --source . \
-  --region asia-south1 \
-  --platform managed \
-  --allow-unauthenticated \
-  --memory 512Mi \
-  --cpu 1 \
-  --min-instances 1 \
-  --max-instances 100 \
-  --timeout 300 \
-  --no-cpu-throttling \
-  --set-env-vars "LLM_API_KEY=sk-KNy4qPAxAw0OEvgZuNyOeA,LLM_BASE_URL=https://imllm.intermesh.net/v1,LLM_MODEL=google/gemini-2.5-flash,OPENPROJECT_BASE_URL=https://project.intermesh.net,GOOGLE_SERVICE_ACCOUNT_JSON=service-account.json"
+| | Value |
+|---|---|
+| Base image | `python:3.11-slim` |
+| Build steps | `apt install gcc`, `pip install -r requirements.txt`, `COPY . .`, `mkdir /app/data` |
+| Build arg | `BUILD_MARKER` (defaults to `unknown` — rolls into `read_build_marker()` cosmetic open issue) |
+| Health check | `python -c "import httpx; r = httpx.get('http://localhost:8080/health'); assert r.status_code == 200"` |
+| CMD | `uvicorn main:app --host 0.0.0.0 --port 8080` |
+
+---
+
+## Recent deploy history
+
+| Revision | Date | Commit | Outcome |
+|---|---|---|---|
+| `qa-bugbot-00042-8zj` | 2026-05-30 | `5002f50` | ★ Stable. Few-shot 50, no Platform line, all RC1-RC8 closed. **CURRENT.** |
+| `qa-bugbot-00041-r2h` | 2026-05-28 | `c09be99` | Working. Few-shot 5. Became rollback target for v3. |
+| `qa-bugbot-00040-wnd` | 2026-05-27 | `157110f` | Failed: `service-account.json` excluded from source. Phase 2 chat replies broke. Rolled back to 00039. |
+| `qa-bugbot-00039-dth` | 2026-05-26 | (pre-spec) | Pre-reliability state. Used as rollback target after v1 failed. |
+| `qa-bugbot-00038-mrz` | 2026-05-25 | (pre-spec) | Earlier pre-reliability state. |
+| `qa-bugbot-00026-btk` | 2026-04-?? | (pre-spec) | Historical "safe checkpoint" cited in old docs. Older than 00039. |
+
+---
+
+## Tag chain (rollback targets, newest → oldest)
+
 ```
-
-**Or use the simplified version (keeps existing env vars):**
-```bash
-gcloud run deploy qa-bugbot \
-  --source . \
-  --region asia-south1 \
-  --no-cpu-throttling
+checkpoint-stable-20260530       → 5002f50  ★ STABLE — matches qa-bugbot-00042-8zj
+reliability-fix-v3-20260530-1326 → 5002f50
+reliability-fix-v2-20260528-0829 → c09be99
+reliability-fix-20260527         → 157110f
+checkpoint-pre-deploy-20260527   → 5228bf2
+pre-reliability-fix-20260527     → 6cbb855  (original main HEAD)
 ```
-
----
-
-## Rollback Procedure
-
-If the new deployment has issues:
-
-```bash
-# List recent revisions
-gcloud run revisions list --service=qa-bugbot --region=asia-south1
-
-# Rollback to previous revision (e.g., revision 09)
-gcloud run services update-traffic qa-bugbot \
-  --region asia-south1 \
-  --to-revisions=qa-bugbot-00009-g9v=100
-```
-
----
-
-## Pre-Deployment Checklist
-
-Before deploying the timeout fixes:
-
-- [x] Code changes tested locally
-- [x] LLM API key verified working
-- [x] No syntax errors in Python files
-- [x] service-account.json exists
-- [x] .env file configured (for local testing)
-- [x] Dockerfile unchanged (uses existing working version)
-- [x] requirements.txt unchanged (no new dependencies)
-- [ ] Backup current revision number: `qa-bugbot-00010-kzb`
-- [ ] Notify QA team of deployment window
-- [ ] Monitor logs after deployment
-
----
-
-## Post-Deployment Verification
-
-After deployment:
-
-1. **Check health endpoint:**
-   ```bash
-   curl https://qa-bugbot-542857204182.asia-south1.run.app/health
-   ```
-
-2. **Test with simple bug report:**
-   - Send text-only bug in Google Chat
-   - Verify response within 10-15 seconds
-   - Check OpenProject ticket created
-
-3. **Monitor logs for errors:**
-   ```bash
-   gcloud run services logs tail qa-bugbot --region asia-south1
-   ```
-
-4. **Check processing times:**
-   - Look for "Bug processed in X.Xs" messages
-   - Should be <30s for text+images
-   - Should be <60s for short videos
-
----
-
-## Summary
-
-### Current Deployment Method
-✅ **Source-based deployment** using `gcloud run deploy --source .`
-
-### NOT Using
-❌ Docker build/push workflow (despite documentation)
-
-### To Deploy Timeout Fixes
-```bash
-gcloud run deploy qa-bugbot --source . --region asia-south1 --no-cpu-throttling
-```
-
-### Estimated Deployment Time
-- Upload source: ~30 seconds
-- Cloud Build: ~2-3 minutes
-- Deploy to Cloud Run: ~30 seconds
-- **Total: ~3-4 minutes**
-
-### Risk Level
-🟢 **Low Risk**
-- Can rollback instantly to previous revision
-- No breaking changes in code
-- Only optimization improvements
-- Same dependencies
-
----
-
-**Ready to deploy when you confirm!**

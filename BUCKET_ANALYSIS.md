@@ -247,4 +247,4 @@ The LLM will:
 2. Define the tag format or keywords for each bucket
 3. Update the LLM system prompt with routing examples
 4. Test locally before deploying
-5. Deploy → if issues → rollback to `qa-bugbot-00026-btk`
+5. Deploy → if issues → rollback to the latest stable revision (`qa-bugbot-00042-8zj` as of 2026-05-30; check `references/CURRENT_DEPLOYMENT_PROCESS.md` for the current target)

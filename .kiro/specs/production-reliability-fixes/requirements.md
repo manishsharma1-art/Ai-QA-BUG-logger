@@ -1,5 +1,10 @@
 # Requirements Document
 
+> **POST-DEPLOY NOTE (2026-05-30):** This document captures the original EARS contract.
+> The deploy is now LIVE and stable. For what actually shipped, see `HANDOVER.md` (this
+> folder) and `LLM_HANDOVER.md` (repo root). Where this document references the old
+> rollback target `qa-bugbot-00026-btk`, the current target is `qa-bugbot-00042-8zj`.
+
 ## Introduction
 
 The QA Bug Logger Bot (`qa-bugbot`, `asia-south1`) was found to be degraded in production
