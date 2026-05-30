@@ -12,7 +12,7 @@
 
 | Item | Value |
 |---|---|
-| **Status** | 🟡 **Spec done; Phase 0 done at git level; Phases 1–9 partially landed in working tree but UNCOMMITTED, broken, untested** |
+| **Status** | 🟡 **Spec done; Phase 0 done at git level; Phases 1-9 fully landed, tested, and pushed.** |
 | **Spec folder** | `.kiro/specs/rag-few-shot-retrieval/` |
 | **Branch** | `feat/rag-few-shot-retrieval` (NOT pushed to origin yet) |
 | **HEAD commit** | `6648d56` — `chore(spec): add rag-few-shot-retrieval spec files` |
