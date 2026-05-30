@@ -11,10 +11,11 @@ deploy_package.zip
 qa_bugbot_stable_checkpoint.zip
 references/
 scripts/
-# Exclude bulky training/audit assets but keep the curated few-shot file
-# that the runtime needs (gemini_client._load_few_shot_block reads it).
+# Exclude bulky training/audit assets but keep the example files that
+# gemini_client._load_few_shot_block reads at startup. Loader prefers the
+# 600-entry training_examples.json and falls back to the smaller fewshot
+# file. Both are uploaded to the image.
 assets/training_data_raw.json
-assets/training_examples.json
 assets/AI_BugLogger_Quality_Audit_Sheet.xlsx
 assets/QA_EVALUATION_MATRIX.csv
 *.db

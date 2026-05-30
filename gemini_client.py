@@ -29,15 +29,17 @@ class Phase2TruncatedError(Exception):
     Raised by _clean_json_response when the LLM response is missing closing
     tokens (open braces, open brackets, unterminated string).
 
-    Should NEVER fire in normal operation given max_tokens=6000 (Theme 3.2).
-    If it does, it indicates a gateway / prompt regression that ops MUST
-    investigate. The caller in enrich_with_media catches this and falls
-    back to the Phase 1 result (Theme 3.3).
+    Class is named for historical/Theme-3 reasons but applies to BOTH Phase 1
+    and Phase 2 — _clean_json_response is shared. The error message is
+    phase-agnostic so logs aren't misleading when this fires from Phase 1.
+
+    Should rarely fire in normal operation given max_tokens=6000 (Theme 3.2).
+    Both Phase 1 and Phase 2 callers catch this and fall back appropriately.
     """
     def __init__(self, repair_log: List[str], preview: str):
         self.repair_log = repair_log
         self.preview = preview
-        super().__init__(f"Phase 2 response truncated: {repair_log}")
+        super().__init__(f"LLM response truncated: {repair_log}")
 
 
 class JsonCleanResult(NamedTuple):
@@ -417,15 +419,23 @@ def _format_example(example: dict) -> str:
     )
 
 
-def _load_few_shot_block(max_examples: int = 5) -> str:
+def _load_few_shot_block(max_examples: int = 50) -> str:
     """Load curated few-shot examples and render as a prompt block.
 
     Returns the formatted block (or empty string if the file is missing /
     corrupt / empty). Never raises. Loaded once at module import time.
+
+    Sources, in priority order:
+      1. assets/training_examples.json — full 600-entry curated set
+      2. assets/training_examples_fewshot.json — fallback 13-entry set
     """
+    candidate_paths = [
+        _Path(__file__).parent / "assets" / "training_examples.json",
+        _Path(__file__).parent / "assets" / "training_examples_fewshot.json",
+    ]
     try:
-        path = _Path(__file__).parent / "assets" / "training_examples_fewshot.json"
-        if not path.exists():
+        path = next((p for p in candidate_paths if p.exists()), None)
+        if path is None:
             return ""
         raw = path.read_text(encoding="utf-8-sig")
         examples = _json_for_loader.loads(raw)
@@ -447,8 +457,8 @@ def _load_few_shot_block(max_examples: int = 5) -> str:
             + "\n\n---\n\n".join(rendered)
         )
         logger.info(
-            "Few-shot loaded: %d examples (%d chars)",
-            len(chosen), len(block),
+            "Few-shot loaded: %d examples from %s (%d chars)",
+            len(chosen), path.name, len(block),
         )
         return block
     except Exception as e:
@@ -457,7 +467,7 @@ def _load_few_shot_block(max_examples: int = 5) -> str:
         return ""
 
 
-_FEW_SHOT_BLOCK = _load_few_shot_block(max_examples=5)
+_FEW_SHOT_BLOCK = _load_few_shot_block(max_examples=50)
 SYSTEM_PROMPT = SYSTEM_PROMPT + _FEW_SHOT_BLOCK
 
 

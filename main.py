@@ -842,8 +842,7 @@ async def _handle_bug_report(
                     f"**Project:** {ticket['project']}\n"
                     f"**Title:** {ticket['title']}\n"
                     f"**Bug Type:** {ticket['bug_type']}\n"
-                    f"**Priority:** {ticket['priority']}\n"
-                    f"**Platform:** {ticket['platform']}\n\n"
+                    f"**Priority:** {ticket['priority']}\n\n"
                     f"🔗 **View Ticket:** {ticket['ticket_url']}\n\n"
                     f"⏱️ _Processed in {elapsed}s_"
                 )
@@ -1065,8 +1064,7 @@ async def _process_media_and_create_ticket(
             f"**Project:** {ticket['project']}\n"
             f"**Title:** {ticket['title']}\n"
             f"**Bug Type:** {ticket['bug_type']}\n"
-            f"**Priority:** {ticket['priority']}\n"
-            f"**Platform:** {ticket['platform']}\n\n"
+            f"**Priority:** {ticket['priority']}\n\n"
             f"🔗 **View Ticket:** {ticket['ticket_url']}\n\n"
             f"⏱️ _Processed in {elapsed}s_"
         )

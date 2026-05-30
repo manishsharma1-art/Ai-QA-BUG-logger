@@ -47,20 +47,26 @@ def test_few_shot_block_appended_to_system_prompt():
 
 
 def test_few_shot_block_has_input_output_pairs():
-    """Each example must follow the INPUT/OUTPUT teaching pattern."""
+    """Each example must follow the INPUT/OUTPUT teaching pattern.
+    Count is parameterised by the loader's max_examples (currently 50)."""
     assert "INPUT (QA brief):" in _FEW_SHOT_BLOCK
     assert "OUTPUT (JSON):" in _FEW_SHOT_BLOCK
-    # 5 examples = 5 pairs of each marker
-    assert _FEW_SHOT_BLOCK.count("INPUT (QA brief):") == 5
-    assert _FEW_SHOT_BLOCK.count("OUTPUT (JSON):") == 5
+    n_inputs = _FEW_SHOT_BLOCK.count("INPUT (QA brief):")
+    n_outputs = _FEW_SHOT_BLOCK.count("OUTPUT (JSON):")
+    assert n_inputs == n_outputs, "INPUT and OUTPUT counts must match"
+    assert 5 <= n_inputs <= 50, (
+        f"expected 5-50 examples (current loader default), got {n_inputs}"
+    )
 
 
 def test_few_shot_block_size_bounded():
     """Cap prompt size to keep Phase 1 latency predictable.
-    5 examples should stay under 8 KB; alarm if a single example regresses."""
-    assert len(_FEW_SHOT_BLOCK) < 8_000, (
+    50 examples yields ~55-60 KB (~14K tokens). Alarm if it ever goes
+    higher than 70 KB — that means a single example regressed
+    catastrophically or someone bumped max_examples past the safe cliff."""
+    assert len(_FEW_SHOT_BLOCK) < 70_000, (
         f"few-shot block ballooned to {len(_FEW_SHOT_BLOCK)} chars — "
-        "reduce max_examples or trim per-example caps"
+        "investigate before deploy"
     )
 
 
@@ -68,9 +74,11 @@ def test_few_shot_block_size_bounded():
 
 def test_each_example_json_is_valid_and_complete():
     """Every OUTPUT block must parse as JSON and contain all 11 fields."""
-    # Split block into sections delimited by the example separator
     sections = [s for s in _FEW_SHOT_BLOCK.split("\n\n---\n\n") if "OUTPUT (JSON):" in s]
-    assert len(sections) == 5, f"expected 5 sections, got {len(sections)}"
+    n_inputs = _FEW_SHOT_BLOCK.count("INPUT (QA brief):")
+    assert len(sections) == n_inputs, (
+        f"expected {n_inputs} OUTPUT sections, got {len(sections)}"
+    )
 
     for i, section in enumerate(sections):
         # Pull the JSON portion after "OUTPUT (JSON):\n"
@@ -140,11 +148,11 @@ def test_loader_returns_empty_on_corrupt_json(tmp_path, monkeypatch):
 
 
 def test_loader_filters_examples_with_missing_fields():
-    """Entries with bug_type=None must be skipped."""
-    # The real curated file has 13 entries, 2 of which lack bug_type.
-    # We use 5 of the 11 valid entries by default (max_examples=5).
-    block = _load_few_shot_block(max_examples=5)
-    assert block.count("INPUT (QA brief):") == 5
+    """Entries with bug_type=None must be skipped. The full 600-entry file
+    has a handful of entries missing required fields; loader's default
+    (max_examples=50) returns exactly 50 valid ones."""
+    block = _load_few_shot_block(max_examples=50)
+    assert block.count("INPUT (QA brief):") == 50
 
 
 def test_loader_caps_examples_count():
