@@ -262,7 +262,7 @@ async def scenario_S9() -> None:
 async def scenario_S10() -> None:
     # S10 - Retrieval path check
     rep = get_base_report()
-    call_args = await run_scenario("S10", make_payload("[S10] Bug in RAG"), 3, rep, rep)
+    call_args = await run_scenario("S10", make_payload("[S10] Bug in RAG that is definitely long enough"), 3, rep, rep)
     assert call_args[0][0] == rep
 
 SCENARIOS: dict[str, Callable[[], "asyncio.Future[None]"]] = {
