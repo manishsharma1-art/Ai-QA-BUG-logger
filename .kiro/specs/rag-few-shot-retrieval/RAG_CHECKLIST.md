@@ -4,6 +4,10 @@
 >
 > _Refreshed 2026-05-30 after Phase 9 + the `/health.rag` model wiring landed. Phases 0–9 are committed and pushed; Phase 10 (deploy gate) is the next leaf._
 >
+> ⏸️ **PAUSED for HOD review (planned 2026-06-01 / Monday).** Demo plan: show the current production line (`qa-bugbot-00042-8zj`) and pitch this RAG branch as Phase 2 of the roadmap. **No deploy until HOD signs off and the user types literal `deploy`.**
+>
+> Phase-2 checkpoint tag: `rag-phase2-checkpoint-20260530` → commit `062a661`.
+>
 > Source of truth for granular status is `tasks.md`. This file is a human-readable mirror — update it when a phase fully closes.
 
 ---
@@ -183,7 +187,8 @@ Deploy hard rules: comma-separated `--update-env-vars`, `--no-cpu-throttling`, `
 ## Tag chain (rollback targets, newest → oldest)
 
 ```
-pre-rag-few-shot-20260530       → 6648d56  ← pre-feature baseline
+rag-phase2-checkpoint-20260530  → 062a661  ← THIS BRANCH paused for HOD review (additive)
+pre-rag-few-shot-20260530       → 6648d56  ← pre-feature baseline (additive)
 checkpoint-stable-20260530      → 159677f  ★ STABLE PRODUCTION (matches qa-bugbot-00042-8zj live)
 reliability-fix-v3-20260530-1326 → 5002f50  (release tag for current production)
 reliability-fix-v2-20260528-0829 → c09be99

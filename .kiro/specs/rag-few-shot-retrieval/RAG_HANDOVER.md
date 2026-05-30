@@ -4,6 +4,8 @@
 >
 > _Created 2026-05-30. Refreshed after Phase 9 ✅ + the `/health.rag` model wiring ✅. All Phases 0–9 are committed, tested, and pushed to `origin/feat/rag-few-shot-retrieval`. Phase 10 (deploy-readiness gate) is the next leaf._
 >
+> ⏸️ **PAUSED for HOD review (planned 2026-06-01 / Monday).** The plan is to demo the current production line (`qa-bugbot-00042-8zj`) at the meeting and pitch RAG as Phase 2 of the roadmap. Implementation is locally complete and pushed; **do not deploy** until the HOD signs off and the user types the literal `deploy` token at Task 11.1.
+>
 > **If you are a new LLM picking this up: the branch on origin contains a clean phase-chain of commits. Run the bootstrap inventory in §1 before doing anything.**
 
 ---
@@ -15,8 +17,9 @@
 | **Status** | 🟢 **Phases 0–9 done, committed, pushed. Ready for Phase 10 readiness summary.** |
 | **Spec folder** | `.kiro/specs/rag-few-shot-retrieval/` |
 | **Branch** | `feat/rag-few-shot-retrieval` (pushed; `origin/feat/rag-few-shot-retrieval` matches local) |
-| **HEAD commit** | `b9ba47f` — `test(rag): replace placeholder tests with 46 real RAG tests` (or later if `/health.rag` wiring committed) |
+| **HEAD commit** | `062a661` — `feat(rag): wire /health.rag (models + endpoint) and refresh trackers` |
 | **Pre-feature baseline tag** | `pre-rag-few-shot-20260530` → `6648d56` (additive only) |
+| **Phase-2 checkpoint tag** | `rag-phase2-checkpoint-20260530` → `062a661` (additive; minted while paused for HOD review) |
 | **Stable rollback target** | `checkpoint-stable-20260530` → `159677fa3` (matches live `qa-bugbot-00042-8zj`) — **DO NOT TOUCH** |
 | **Live revision (untouched)** | `qa-bugbot-00042-8zj` (asia-south1, 100% traffic) |
 | **Live URL** | `https://qa-bugbot-542857204182.asia-south1.run.app` |
@@ -30,16 +33,17 @@
 ### Commit chain on this branch
 
 ```
-b9ba47f (or later) test(rag): replace placeholder tests with 46 real RAG tests
-2000b96 docs(rag): refresh handover + checklist after Phase 9
-e28756f chore(rag): add requirements.txt
-cad1b78 test(rag): property tests P1-P5 + synthetic webhook S10
-cb0db84 chore(rag): pin sentence-transformers + prefetch model in Dockerfile
-bc36d17 feat(rag): gemini_client RAG integration and health endpoint
-2f66eb0 feat(rag): bug_retriever core, GCS cache, singleton and lifespan
-e8361a6 test(rag): add Phase 1 test skeletons + retriever fixtures
-c436051 docs(rag): add handover + checklist
-6648d56 (tag: pre-rag-few-shot-20260530) chore(spec): add rag-few-shot-retrieval spec files
+062a661 (HEAD, tag: rag-phase2-checkpoint-20260530) feat(rag): wire /health.rag (models + endpoint) and refresh trackers
+b9ba47f                                              test(rag): replace placeholder tests with 46 real RAG tests
+2000b96                                              docs(rag): refresh handover + checklist after Phase 9
+e28756f                                              chore(rag): add requirements.txt
+cad1b78                                              test(rag): property tests P1-P5 + synthetic webhook S10
+cb0db84                                              chore(rag): pin sentence-transformers + prefetch model in Dockerfile
+bc36d17                                              feat(rag): gemini_client RAG integration and health endpoint
+2f66eb0                                              feat(rag): bug_retriever core, GCS cache, singleton and lifespan
+e8361a6                                              test(rag): add Phase 1 test skeletons + retriever fixtures
+c436051                                              docs(rag): add handover + checklist
+6648d56  (tag: pre-rag-few-shot-20260530)            chore(spec): add rag-few-shot-retrieval spec files
 ```
 
 ### Known gaps and flakes
