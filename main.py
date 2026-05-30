@@ -165,6 +165,15 @@ async def lifespan(app: FastAPI):
     )
     logger.info("✅ Google Chat client configured")
 
+    try:
+        from bug_retriever import init_retriever
+        init_retriever()
+    except ImportError:
+        logger.warning("bug_retriever module not importable — RAG disabled")
+    except Exception as e:
+        logger.error("RAG init unexpected failure: %s", e, exc_info=True)
+
+
     logger.info("🚀 Bot is ready!")
     logger.info("=" * 60)
 
@@ -724,7 +733,7 @@ async def _handle_bug_report(
     try:
         logger.info(f"Phase 1 INLINE: Analyzing text from {display_name}...")
         initial_report = await asyncio.wait_for(
-            gemini_client.analyze_text_brief(text_for_llm),
+            gemini_client.analyze_text_brief(text_for_llm, project_id=target_project_id),
             timeout=25.0  # Must fit within webhook response window
         )
         elapsed_p1 = round(time.time() - start_time, 1)
@@ -939,7 +948,7 @@ async def _process_media_and_create_ticket(
             try:
                 logger.info(f"Phase 2: Enriching with {len(media_items)} media items...")
                 enrichment_result = await asyncio.wait_for(
-                    gemini_client.enrich_with_media(text, initial_report, media_items),
+                    gemini_client.enrich_with_media(text, initial_report, media_items, project_id=project_id),
                     timeout=180.0  # 3 minutes max
                 )
 

@@ -468,7 +468,8 @@ def _load_few_shot_block(max_examples: int = 50) -> str:
 
 
 _FEW_SHOT_BLOCK = _load_few_shot_block(max_examples=50)
-SYSTEM_PROMPT = SYSTEM_PROMPT + _FEW_SHOT_BLOCK
+SYSTEM_PROMPT_BASE = SYSTEM_PROMPT
+SYSTEM_PROMPT = SYSTEM_PROMPT_BASE + _FEW_SHOT_BLOCK
 
 
 # ─────────────────────────────────────────────
@@ -553,6 +554,15 @@ OUTPUT — exactly this JSON shape, no markdown, no commentary:
 """
 
 
+
+def _render_examples_block(examples: list) -> str:
+    rendered = [_format_example(e) for e in examples]
+    block = (
+        "\n\n## REFERENCE EXAMPLES (real tickets — match this style and discipline)\n\n"
+        + "\n\n---\n\n".join(rendered)
+    )
+    return block
+
 class GeminiClient:
     """
     LLM client for bug analysis via OpenAI-compatible API.
@@ -564,6 +574,38 @@ class GeminiClient:
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
         logger.info(f"LLM client initialized: model={model}, base_url={base_url}")
+
+
+    def _build_fewshot_block(
+        self,
+        *,
+        query: str,
+        project_id: Optional[int],
+        phase: str,
+    ) -> tuple[str, dict]:
+        from bug_retriever import get_retriever
+        retriever = get_retriever()
+        examples = []
+        outcome = "index_unavailable"
+        if retriever is not None:
+            try:
+                import os
+                top_k = int(os.environ.get("RAG_TOPK", "5"))
+                examples = retriever.retrieve(
+                    query=query, k=top_k,
+                    project_filter=project_id, phase=phase,
+                )
+                outcome = getattr(retriever, "_last_retrieve_outcome", "ok") if examples else "empty_corpus"
+            except Exception as e:
+                logger.warning("RAG_RETRIEVE unexpected raise: %s", e)
+                examples = []
+                outcome = "embed_error"
+        if examples:
+            block = _render_examples_block(examples)
+            return block, {"count": len(examples), "outcome": outcome, "source": "retrieved"}
+        if _FEW_SHOT_BLOCK:
+            return _FEW_SHOT_BLOCK, {"count": 50, "outcome": outcome, "source": "static"}
+        return "", {"count": 0, "outcome": outcome, "source": "empty"}
 
     async def analyze_bug_report(
         self,
@@ -580,7 +622,7 @@ class GeminiClient:
         # Phase 1: Text-only analysis (always runs first)
         logger.info("═" * 40)
         logger.info("PHASE 1: Analyzing QA text brief...")
-        initial_report = await self.analyze_text_brief(text)
+        initial_report = await self.analyze_text_brief(text, project_id=None)
         logger.info(f"PHASE 1 COMPLETE: {initial_report.title}")
         logger.info("═" * 40)
 
@@ -589,7 +631,7 @@ class GeminiClient:
             logger.info("═" * 40)
             logger.info(f"PHASE 2: Enriching with {len(media_items)} media items...")
             try:
-                enriched_result = await self.enrich_with_media(text, initial_report, media_items)
+                enriched_result = await self.enrich_with_media(text, initial_report, media_items, project_id=None)
                 if isinstance(enriched_result, dict) and not enriched_result.get("is_valid", True):
                     logger.info("PHASE 2 COMPLETE: Media rejected by inline screening")
                     logger.info("═" * 40)
@@ -603,7 +645,7 @@ class GeminiClient:
 
         return initial_report
 
-    async def analyze_text_brief(self, text: str) -> ExtractedBugReport:
+    async def analyze_text_brief(self, text: str, project_id: Optional[int] = None) -> ExtractedBugReport:
         """
         Phase 1: Fast text-only analysis of the QA brief.
         Single attempt, no retries (must complete within 25s webhook deadline).
@@ -611,8 +653,11 @@ class GeminiClient:
         """
         import asyncio
 
+
+        fewshot_block, rag_meta = self._build_fewshot_block(query=text, project_id=project_id, phase="phase1")
+        system_prompt = SYSTEM_PROMPT_BASE + fewshot_block
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Analyze the following bug report and extract structured bug data as JSON.\n\nQA Tester's Report:\n{text}"},
         ]
 
@@ -636,7 +681,7 @@ class GeminiClient:
             )
 
             response_text = response.choices[0].message.content
-            _log_llm_call("phase1", start_ts, response_chars=len(response_text or ""))
+            _log_llm_call("phase1", start_ts, response_chars=len(response_text or ""), extra={"rag_examples": rag_meta["count"], "rag_outcome": rag_meta["outcome"], "rag_source": rag_meta["source"]})
             logger.info(f"Phase 1 LLM response: {response_text[:300]}")
 
             cleaned = self._clean_json_response(response_text)
@@ -662,6 +707,7 @@ class GeminiClient:
         text: str,
         initial_report: ExtractedBugReport,
         media_items: List[Dict[str, Any]],
+        project_id: Optional[int] = None,
     ) -> ExtractedBugReport:
         """
         Phase 2: Enrich bug report using video frames and screenshots.
@@ -732,8 +778,11 @@ class GeminiClient:
 
         logger.info(f"Phase 2: Sending {frame_count} visual frames to LLM for detailed analysis")
 
+
+        fewshot_block, rag_meta = self._build_fewshot_block(query=text, project_id=project_id, phase="phase1")
+        system_prompt = SYSTEM_PROMPT_BASE + fewshot_block
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": content_parts},
         ]
 
@@ -760,13 +809,13 @@ class GeminiClient:
             _log_llm_call(
                 "phase2", start_ts,
                 response_chars=len(response.choices[0].message.content or ""),
-                extra={"frames": frame_count},
+                extra={"frames": frame_count, "rag_examples": rag_meta["count"], "rag_outcome": rag_meta["outcome"], "rag_source": rag_meta["source"]},
             )
         except asyncio.TimeoutError:
             _log_llm_call(
                 "phase2", start_ts,
                 exc=TimeoutError("phase2 wait_for 50s"),
-                extra={"frames": frame_count},
+                extra={"frames": frame_count, "rag_examples": rag_meta["count"], "rag_outcome": rag_meta["outcome"], "rag_source": rag_meta["source"]},
             )
             # Fall-back path 2: timeout → return Phase 1 result
             logger.error(
