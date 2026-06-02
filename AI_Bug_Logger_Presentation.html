@@ -1,0 +1,908 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Bug Logger — Presentation</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #0a0e1a;
+      --bg-card: rgba(255,255,255,0.04);
+      --border-card: rgba(255,255,255,0.08);
+      --accent-blue: #4f8cff;
+      --accent-cyan: #00d4ff;
+      --accent-violet: #a855f7;
+      --accent-green: #22d3ee;
+      --accent-orange: #f97316;
+      --accent-red: #ef4444;
+      --accent-lime: #84cc16;
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --gradient-hero: linear-gradient(135deg, #4f8cff 0%, #a855f7 50%, #00d4ff 100%);
+      --gradient-card: linear-gradient(145deg, rgba(79,140,255,0.08), rgba(168,85,247,0.06));
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg-dark);
+      color: var(--text-primary);
+      overflow: hidden;
+      height: 100vh;
+      width: 100vw;
+    }
+
+    /* ──── Slide Container ──── */
+    .slides-container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    .slide {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      padding: 40px 60px;
+      opacity: 0;
+      transform: translateX(80px) scale(0.96);
+      transition: all 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+      pointer-events: none;
+      background: var(--bg-dark);
+      overflow-y: auto;
+    }
+
+    .slide.active {
+      opacity: 1;
+      transform: translateX(0) scale(1);
+      pointer-events: all;
+    }
+
+    .slide.prev {
+      opacity: 0;
+      transform: translateX(-80px) scale(0.96);
+    }
+
+    /* ──── Background Effects ──── */
+    .slide::before {
+      content: '';
+      position: absolute;
+      top: -30%; left: -20%;
+      width: 60vw; height: 60vw;
+      background: radial-gradient(circle, rgba(79,140,255,0.07) 0%, transparent 60%);
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .slide::after {
+      content: '';
+      position: absolute;
+      bottom: -30%; right: -20%;
+      width: 50vw; height: 50vw;
+      background: radial-gradient(circle, rgba(168,85,247,0.06) 0%, transparent 60%);
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .slide-inner {
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      max-width: 1200px;
+    }
+
+    /* ──── Typography ──── */
+    .slide-number {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: var(--accent-blue);
+      margin-bottom: 12px;
+    }
+
+    .slide-title {
+      font-size: clamp(28px, 3.5vw, 48px);
+      font-weight: 800;
+      line-height: 1.15;
+      margin-bottom: 8px;
+      background: var(--gradient-hero);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .slide-subtitle {
+      font-size: clamp(14px, 1.4vw, 20px);
+      font-weight: 400;
+      color: var(--text-secondary);
+      margin-bottom: 32px;
+      max-width: 700px;
+    }
+
+    h3 {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin-bottom: 12px;
+      letter-spacing: 0.3px;
+    }
+
+    /* ──── Cards Grid ──── */
+    .cards-grid {
+      display: grid;
+      gap: 16px;
+    }
+    .cards-grid.two-col { grid-template-columns: 1fr 1fr; }
+    .cards-grid.three-col { grid-template-columns: 1fr 1fr 1fr; }
+    .cards-grid.four-col { grid-template-columns: 1fr 1fr 1fr 1fr; }
+
+    .card {
+      background: var(--gradient-card);
+      border: 1px solid var(--border-card);
+      border-radius: 16px;
+      padding: 22px 24px;
+      backdrop-filter: blur(12px);
+      transition: transform 0.3s ease, border-color 0.3s ease;
+    }
+
+    .card:hover {
+      transform: translateY(-3px);
+      border-color: rgba(79,140,255,0.25);
+    }
+
+    .card-icon {
+      font-size: 28px;
+      margin-bottom: 10px;
+      display: block;
+    }
+
+    .card-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin-bottom: 6px;
+    }
+
+    .card-desc {
+      font-size: 12.5px;
+      line-height: 1.6;
+      color: var(--text-secondary);
+    }
+
+    /* ──── Stats Row ──── */
+    .stats-row {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+    }
+
+    .stat-box {
+      flex: 1;
+      min-width: 140px;
+      background: var(--gradient-card);
+      border: 1px solid var(--border-card);
+      border-radius: 14px;
+      padding: 18px 20px;
+      text-align: center;
+    }
+
+    .stat-value {
+      font-size: clamp(22px, 2.5vw, 36px);
+      font-weight: 800;
+      background: var(--gradient-hero);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      line-height: 1.1;
+    }
+
+    .stat-label {
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-muted);
+      margin-top: 4px;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+
+    /* ──── Flow Diagram ──── */
+    .flow-container {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      margin: 20px 0 24px;
+      flex-wrap: wrap;
+    }
+
+    .flow-step {
+      background: var(--gradient-card);
+      border: 1px solid var(--border-card);
+      border-radius: 14px;
+      padding: 14px 18px;
+      text-align: center;
+      min-width: 130px;
+      transition: transform 0.3s ease, box-shadow 0.3s ease;
+    }
+
+    .flow-step:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 8px 30px rgba(79,140,255,0.1);
+    }
+
+    .flow-step .icon { font-size: 24px; margin-bottom: 6px; }
+    .flow-step .label { font-size: 11px; font-weight: 600; color: var(--text-primary); }
+    .flow-step .sub { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+
+    .flow-arrow {
+      font-size: 20px;
+      color: var(--accent-blue);
+      opacity: 0.5;
+      flex-shrink: 0;
+    }
+
+    /* ──── Table ──── */
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12.5px;
+      margin-top: 8px;
+    }
+
+    .data-table th {
+      text-align: left;
+      padding: 10px 14px;
+      font-weight: 600;
+      font-size: 11px;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      color: var(--accent-cyan);
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      background: rgba(79,140,255,0.04);
+    }
+
+    .data-table td {
+      padding: 9px 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      color: var(--text-secondary);
+    }
+
+    .data-table tr:hover td {
+      background: rgba(79,140,255,0.03);
+    }
+
+    .data-table .highlight {
+      color: var(--accent-cyan);
+      font-weight: 700;
+    }
+
+    .data-table .savings { color: var(--accent-lime); font-weight: 600; }
+
+    /* ──── Tags ──── */
+    .tag {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+    }
+    .tag-blue { background: rgba(79,140,255,0.15); color: var(--accent-blue); }
+    .tag-violet { background: rgba(168,85,247,0.15); color: var(--accent-violet); }
+    .tag-green { background: rgba(34,211,238,0.12); color: var(--accent-green); }
+    .tag-orange { background: rgba(249,115,22,0.15); color: var(--accent-orange); }
+
+    /* ──── Compare Bar ──── */
+    .compare-bars { margin: 16px 0; }
+    .compare-row {
+      display: flex;
+      align-items: center;
+      margin-bottom: 10px;
+      gap: 12px;
+    }
+    .compare-label {
+      width: 100px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-align: right;
+      flex-shrink: 0;
+    }
+    .compare-track {
+      flex: 1;
+      height: 28px;
+      background: rgba(255,255,255,0.03);
+      border-radius: 8px;
+      overflow: hidden;
+      position: relative;
+    }
+    .compare-fill {
+      height: 100%;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      padding-right: 12px;
+      font-size: 11px;
+      font-weight: 700;
+      color: white;
+      transition: width 1.2s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    .compare-fill.red { background: linear-gradient(90deg, #ef4444, #f97316); }
+    .compare-fill.green { background: linear-gradient(90deg, #22d3ee, #84cc16); }
+
+    /* ──── Architecture diagram ──── */
+    .arch-container {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr auto 1fr;
+      align-items: center;
+      gap: 12px;
+      margin: 16px 0;
+    }
+    .arch-box {
+      background: var(--gradient-card);
+      border: 1px solid var(--border-card);
+      border-radius: 14px;
+      padding: 16px;
+      text-align: center;
+    }
+    .arch-box .icon { font-size: 28px; margin-bottom: 6px; }
+    .arch-box .name { font-size: 13px; font-weight: 700; color: var(--text-primary); }
+    .arch-box .detail { font-size: 10.5px; color: var(--text-muted); margin-top: 3px; }
+    .arch-arrow {
+      font-size: 24px;
+      color: var(--accent-blue);
+      text-align: center;
+      opacity: 0.5;
+    }
+
+    /* ──── Navigation ──── */
+    .nav-bar {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      z-index: 100;
+      background: rgba(10,14,26,0.85);
+      border: 1px solid var(--border-card);
+      border-radius: 50px;
+      padding: 8px 20px;
+      backdrop-filter: blur(20px);
+    }
+
+    .nav-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.15);
+      cursor: pointer;
+      transition: all 0.3s ease;
+      border: none;
+      outline: none;
+    }
+    .nav-dot.active {
+      background: var(--accent-blue);
+      box-shadow: 0 0 12px rgba(79,140,255,0.5);
+      width: 28px;
+      border-radius: 10px;
+    }
+
+    .nav-btn {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.1);
+      color: var(--text-primary);
+      border-radius: 50%;
+      width: 34px; height: 34px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 14px;
+      transition: all 0.3s ease;
+    }
+    .nav-btn:hover { background: rgba(79,140,255,0.15); border-color: var(--accent-blue); }
+
+    /* ──── Logo Badge ──── */
+    .logo-badge {
+      position: fixed;
+      top: 20px;
+      left: 28px;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-primary);
+      opacity: 0.7;
+    }
+    .logo-badge .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--accent-blue);
+      box-shadow: 0 0 10px var(--accent-blue);
+    }
+
+    /* ──── Phase Labels ──── */
+    .phase-row {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .phase-box {
+      flex: 1;
+      background: var(--gradient-card);
+      border: 1px solid var(--border-card);
+      border-radius: 12px;
+      padding: 14px 16px;
+    }
+    .phase-box .phase-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: var(--accent-cyan);
+      margin-bottom: 6px;
+    }
+    .phase-box .phase-detail {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+    .mono { font-family: 'JetBrains Mono', monospace; }
+
+    /* ──── Two-panel layout ──── */
+    .two-panel {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+    }
+
+    .section-divider {
+      width: 100%;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(79,140,255,0.2), transparent);
+      margin: 20px 0;
+    }
+
+    /* ──── Indiamart branding ──── */
+    .brand-footer {
+      position: fixed;
+      bottom: 24px;
+      right: 28px;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-muted);
+      z-index: 100;
+      letter-spacing: 0.5px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="logo-badge">
+  <span class="dot"></span>
+  AI Bug Logger
+</div>
+<div class="brand-footer">IndiaMART InterMESH Ltd.</div>
+
+<div class="slides-container" id="slidesContainer">
+
+  <!-- ════════════════ SLIDE 1: THE PROBLEM ════════════════ -->
+  <div class="slide active" id="slide-0">
+    <div class="slide-inner">
+      <div class="slide-number">Slide 01 — The Problem</div>
+      <div class="slide-title">Manual Bug Logging<br>is Broken</div>
+      <div class="slide-subtitle">QA engineers waste 10+ minutes per bug filling forms, formatting descriptions, and uploading media — losing testing flow and producing inconsistent tickets.</div>
+
+      <div class="stats-row">
+        <div class="stat-box">
+          <div class="stat-value">10 min</div>
+          <div class="stat-label">Per Bug (Manual)</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-value">3,000</div>
+          <div class="stat-label">Bugs / Month</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-value">500 hrs</div>
+          <div class="stat-label">Wasted / Month</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-value">40%</div>
+          <div class="stat-label">Inconsistent Reports</div>
+        </div>
+      </div>
+
+      <div class="cards-grid three-col">
+        <div class="card">
+          <span class="card-icon">⏱️</span>
+          <div class="card-title">Time Consuming</div>
+          <div class="card-desc">Filling OpenProject fields — title, steps, environment, device, OS, priority, bug type, attachments — takes 10+ min per bug.</div>
+        </div>
+        <div class="card">
+          <span class="card-icon">🧠</span>
+          <div class="card-title">Context Loss</div>
+          <div class="card-desc">Switching from the app under test to the project management tool breaks the tester's flow and critical reproduction details are forgotten.</div>
+        </div>
+        <div class="card">
+          <span class="card-icon">📉</span>
+          <div class="card-title">Inconsistent Quality</div>
+          <div class="card-desc">Report quality varies wildly — missing steps, wrong priorities, vague titles — causing developer back-and-forth and delayed fixes.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ════════════════ SLIDE 2: ARCHITECTURE & FLOW ════════════════ -->
+  <div class="slide" id="slide-1">
+    <div class="slide-inner">
+      <div class="slide-number">Slide 02 — Architecture & Flow</div>
+      <div class="slide-title">How AI Bug Logger Works</div>
+      <div class="slide-subtitle">A two-phase async pipeline that beats the 30-second Google Chat webhook deadline while supporting full video analysis.</div>
+
+      <div class="flow-container">
+        <div class="flow-step">
+          <div class="icon">💬</div>
+          <div class="label">QA Tester</div>
+          <div class="sub">Google Chat</div>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step">
+          <div class="icon">🔀</div>
+          <div class="label">Bucket Router</div>
+          <div class="sub">Project Detection</div>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step">
+          <div class="icon">🧠</div>
+          <div class="label">Gemini 2.5 Flash</div>
+          <div class="sub">AI Analysis</div>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step">
+          <div class="icon">📋</div>
+          <div class="label">OpenProject</div>
+          <div class="sub">Ticket Creation</div>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step">
+          <div class="icon">✅</div>
+          <div class="label">Confirmation</div>
+          <div class="sub">Reply to QA</div>
+        </div>
+      </div>
+
+      <div class="phase-row">
+        <div class="phase-box">
+          <div class="phase-label">Phase 1 — Inline (≤ 25s)</div>
+          <div class="phase-detail">
+            <strong>Synchronous.</strong> Bucket routing (Python regex + fuzzy), RAG retrieval (top-5 similar tickets), text analysis via Gemini. Returns immediate response for text-only bugs, or an acknowledgment if media is present.
+          </div>
+        </div>
+        <div class="phase-box">
+          <div class="phase-label">Phase 2 — Async Background (15–50s)</div>
+          <div class="phase-detail">
+            <strong>Background task.</strong> Downloads media via Google Chat API, OpenCV extracts 1 frame/sec (max 20 frames, 480px), sends frames to Gemini for enriched analysis. Three fallback paths guarantee a ticket is always created.
+          </div>
+        </div>
+      </div>
+
+      <div class="cards-grid four-col">
+        <div class="card">
+          <div class="card-title">34 Projects</div>
+          <div class="card-desc">Auto-routed by bucket_router.py using tag matching, free-text scoring, and device detection.</div>
+        </div>
+        <div class="card">
+          <div class="card-title">606 Training Tickets</div>
+          <div class="card-desc">RAG retrieves the 5 most relevant real tickets as few-shot examples per query.</div>
+        </div>
+        <div class="card">
+          <div class="card-title">11 Fields Auto-Filled</div>
+          <div class="card-desc">Title, steps, priority, bug type, environment, device, OS, and more — all AI-extracted.</div>
+        </div>
+        <div class="card">
+          <div class="card-title">3 Fallback Paths</div>
+          <div class="card-desc">Truncation, timeout, and default-stuffing all gracefully degrade to Phase 1 result.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ════════════════ SLIDE 3: TECH STACK + TOKEN COST ════════════════ -->
+  <div class="slide" id="slide-2">
+    <div class="slide-inner">
+      <div class="slide-number">Slide 03 — Tech Stack & Token Cost Analysis</div>
+      <div class="slide-title">Technology & Cost Efficiency</div>
+      <div class="slide-subtitle">Built for production reliability with aggressive cost optimization — ₹1.18 per bug all-in.</div>
+
+      <div class="two-panel">
+        <!-- Left: Tech Stack -->
+        <div>
+          <h3>🛠️ Technology Stack</h3>
+          <div class="cards-grid" style="grid-template-columns: 1fr 1fr; gap: 10px;">
+            <div class="card" style="padding: 14px 16px;">
+              <div class="card-title">Backend</div>
+              <div class="card-desc"><span class="tag tag-blue">FastAPI</span> <span class="tag tag-blue">Python 3.11</span><br>Async pipeline with uvicorn</div>
+            </div>
+            <div class="card" style="padding: 14px 16px;">
+              <div class="card-title">AI / LLM</div>
+              <div class="card-desc"><span class="tag tag-violet">Gemini 2.5 Flash</span><br>via IndiaMART LLM Gateway</div>
+            </div>
+            <div class="card" style="padding: 14px 16px;">
+              <div class="card-title">Deployment</div>
+              <div class="card-desc"><span class="tag tag-green">Google Cloud Run</span><br>asia-south1, 1 GiB, auto-scale</div>
+            </div>
+            <div class="card" style="padding: 14px 16px;">
+              <div class="card-title">Video Processing</div>
+              <div class="card-desc"><span class="tag tag-orange">OpenCV</span><br>1 fps, 480px, max 20 frames</div>
+            </div>
+            <div class="card" style="padding: 14px 16px;">
+              <div class="card-title">RAG Engine</div>
+              <div class="card-desc"><span class="tag tag-violet">MiniLM-L6-v2</span><br>384-dim embeddings, cosine sim</div>
+            </div>
+            <div class="card" style="padding: 14px 16px;">
+              <div class="card-title">Integrations</div>
+              <div class="card-desc"><span class="tag tag-green">Google Chat</span> <span class="tag tag-blue">OpenProject</span><br>Webhook + REST API v3</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: Cost Analysis -->
+        <div>
+          <h3>💰 Token Usage & Cost (per bug)</h3>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Bug Shape</th>
+                <th>Tokens</th>
+                <th>Cost (₹)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Text-only</td>
+                <td class="mono">16,260</td>
+                <td class="highlight">₹0.51</td>
+              </tr>
+              <tr>
+                <td>+ 1 Screenshot</td>
+                <td class="mono">39,780</td>
+                <td class="highlight">₹1.74</td>
+              </tr>
+              <tr>
+                <td>+ 1 Video (25s)</td>
+                <td class="mono">71,980</td>
+                <td class="highlight">₹2.54</td>
+              </tr>
+              <tr>
+                <td>Screenshot + Video</td>
+                <td class="mono">73,780</td>
+                <td class="highlight">₹2.59</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="section-divider"></div>
+
+          <h3>📊 Monthly Cost @ 3,000 bugs</h3>
+          <div class="stats-row" style="margin-bottom: 12px;">
+            <div class="stat-box" style="flex: 1;">
+              <div class="stat-value">₹3,552</div>
+              <div class="stat-label">LLM Cost / Month</div>
+            </div>
+            <div class="stat-box" style="flex: 1;">
+              <div class="stat-value">₹1.18</div>
+              <div class="stat-label">Per Bug All-In</div>
+            </div>
+            <div class="stat-box" style="flex: 1;">
+              <div class="stat-value">< ₹1K</div>
+              <div class="stat-label">Infra (flat)</div>
+            </div>
+          </div>
+          <div class="card-desc" style="font-size: 11px; color: var(--text-muted); text-align: center;">RAG optimization further reduces LLM cost to <strong>₹2,100/mo</strong> (−41% savings)</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ════════════════ SLIDE 4: IMPACT & EFFECTIVENESS ════════════════ -->
+  <div class="slide" id="slide-3">
+    <div class="slide-inner">
+      <div class="slide-number">Slide 04 — Impact & Effectiveness</div>
+      <div class="slide-title">Transformative Results</div>
+      <div class="slide-subtitle">From 10-minute manual bug reports to under 60 seconds — saving 1,800+ hours per year.</div>
+
+      <div class="stats-row">
+        <div class="stat-box">
+          <div class="stat-value">90%</div>
+          <div class="stat-label">Time Saved / Bug</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-value">&lt; 30s</div>
+          <div class="stat-label">Text Bug Filing</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-value">&lt; 2 min</div>
+          <div class="stat-label">Video Bug Filing</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-value">1,800 hrs</div>
+          <div class="stat-label">Saved Per Year</div>
+        </div>
+      </div>
+
+      <div class="two-panel">
+        <div>
+          <h3>⚡ Before vs After</h3>
+          <div class="compare-bars">
+            <div class="compare-row">
+              <div class="compare-label">Manual</div>
+              <div class="compare-track">
+                <div class="compare-fill red" style="width: 100%;">10 min</div>
+              </div>
+            </div>
+            <div class="compare-row">
+              <div class="compare-label">AI Bot</div>
+              <div class="compare-track">
+                <div class="compare-fill green" style="width: 10%;">&lt;1 min</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="section-divider"></div>
+
+          <h3>🏆 Key Achievements</h3>
+          <div class="cards-grid" style="grid-template-columns: 1fr; gap: 8px;">
+            <div class="card" style="padding: 12px 16px; display: flex; align-items: center; gap: 12px;">
+              <span style="font-size: 20px;">🎯</span>
+              <div>
+                <div class="card-title">100% Field Coverage</div>
+                <div class="card-desc">11 mandatory OpenProject fields auto-populated by AI — no manual form-filling needed.</div>
+              </div>
+            </div>
+            <div class="card" style="padding: 12px 16px; display: flex; align-items: center; gap: 12px;">
+              <span style="font-size: 20px;">🔄</span>
+              <div>
+                <div class="card-title">Zero Context Switch</div>
+                <div class="card-desc">QA stays in Google Chat — no need to open OpenProject. Just type, attach, and go.</div>
+              </div>
+            </div>
+            <div class="card" style="padding: 12px 16px; display: flex; align-items: center; gap: 12px;">
+              <span style="font-size: 20px;">📐</span>
+              <div>
+                <div class="card-title">Consistent Quality</div>
+                <div class="card-desc">AI-calibrated priority (95% Medium), structured steps, and standardized titles across all testers.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <h3>💼 Business Impact (Annual)</h3>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th>Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Bugs automated / year</td>
+                <td class="highlight">36,000</td>
+              </tr>
+              <tr>
+                <td>Hours saved / year</td>
+                <td class="highlight">1,800 hrs</td>
+              </tr>
+              <tr>
+                <td>Equivalent headcount saved</td>
+                <td class="highlight">~1 FTE</td>
+              </tr>
+              <tr>
+                <td>Annual LLM cost</td>
+                <td class="savings">₹42,624</td>
+              </tr>
+              <tr>
+                <td>Annual infra cost</td>
+                <td class="savings">< ₹12,000</td>
+              </tr>
+              <tr>
+                <td>Total annual cost</td>
+                <td class="savings">< ₹55,000</td>
+              </tr>
+              <tr>
+                <td>Cost per bug</td>
+                <td class="savings">₹1.18</td>
+              </tr>
+              <tr>
+                <td>Projects supported</td>
+                <td class="highlight">34</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="section-divider"></div>
+          <div class="card" style="background: linear-gradient(135deg, rgba(34,211,238,0.08), rgba(132,204,22,0.06)); border-color: rgba(34,211,238,0.2); text-align: center; padding: 16px;">
+            <div style="font-size: 13px; font-weight: 700; color: var(--accent-green); margin-bottom: 4px;">ROI Summary</div>
+            <div style="font-size: 12px; color: var(--text-secondary);">Saving <strong style="color: var(--accent-cyan);">1,800 hours/year</strong> for just <strong style="color: var(--accent-lime);">₹55K/year</strong> — equivalent to adding a full-time engineer at <strong style="color: var(--accent-lime);">1/10th the cost</strong>.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ──── Navigation ──── -->
+<nav class="nav-bar">
+  <button class="nav-btn" id="prevBtn" onclick="changeSlide(-1)">←</button>
+  <button class="nav-dot active" onclick="goToSlide(0)"></button>
+  <button class="nav-dot" onclick="goToSlide(1)"></button>
+  <button class="nav-dot" onclick="goToSlide(2)"></button>
+  <button class="nav-dot" onclick="goToSlide(3)"></button>
+  <button class="nav-btn" id="nextBtn" onclick="changeSlide(1)">→</button>
+</nav>
+
+<script>
+  let currentSlide = 0;
+  const totalSlides = 4;
+
+  function goToSlide(n) {
+    const slides = document.querySelectorAll('.slide');
+    const dots = document.querySelectorAll('.nav-dot');
+
+    slides[currentSlide].classList.remove('active');
+    slides[currentSlide].classList.add('prev');
+    dots[currentSlide].classList.remove('active');
+
+    currentSlide = n;
+
+    slides.forEach((s, i) => {
+      s.classList.remove('active', 'prev');
+      if (i < currentSlide) s.classList.add('prev');
+    });
+
+    slides[currentSlide].classList.add('active');
+    dots[currentSlide].classList.add('active');
+  }
+
+  function changeSlide(dir) {
+    let next = currentSlide + dir;
+    if (next < 0) next = 0;
+    if (next >= totalSlides) next = totalSlides - 1;
+    goToSlide(next);
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); changeSlide(1); }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); changeSlide(-1); }
+  });
+
+  // Animate comparison bars on slide 4 entry
+  const observer = new MutationObserver(() => {
+    const slide3 = document.getElementById('slide-3');
+    if (slide3.classList.contains('active')) {
+      const fills = slide3.querySelectorAll('.compare-fill');
+      fills.forEach(f => { f.style.width = f.style.width; });
+    }
+  });
+  observer.observe(document.getElementById('slide-3'), { attributes: true, attributeFilter: ['class'] });
+</script>
+
+</body>
+</html>
