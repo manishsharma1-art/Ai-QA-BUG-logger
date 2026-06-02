@@ -19,8 +19,10 @@ RUN apt-get update && apt-get install -y gcc && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+ARG ST_MODEL=sentence-transformers/all-MiniLM-L6-v2
+ENV HF_HUB_DISABLE_TELEMETRY=1 \
+    SENTENCE_TRANSFORMERS_HOME=/app/.cache/sentence-transformers
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('${ST_MODEL}')"
 
 COPY . .
 
