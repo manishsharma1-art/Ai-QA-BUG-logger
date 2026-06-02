@@ -405,7 +405,7 @@ def _resolve_tag(tag: str) -> Optional[int]:
     # Step 4: Alias-substring match (alias must appear within tag, alias must be ≥3 chars)
     # Sort by length descending so longer aliases match first (fixes Property 3 for typos like 'adesktop lms' vs 'desktop lms' vs 'lms')
     for alias, proj_name in sorted(PROJECT_ALIASES.items(), key=lambda x: len(x[0]), reverse=True):
-        if len(alias) >= 3 and alias in tag_lower:
+        if len(alias) >= 3 and re.search(r'\b' + re.escape(alias) + r'\b', tag_lower):
             if proj_name in OP_PROJECTS:
                 return OP_PROJECTS[proj_name]
 
