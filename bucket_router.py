@@ -418,7 +418,8 @@ def _resolve_tag(tag: str) -> Optional[int]:
     if len(tag_lower) < 4:
         return None
     candidates = [n.lower() for n in
-                  list(OP_PROJECTS.keys()) + list(PROJECT_ALIASES.keys())]
+                  list(OP_PROJECTS.keys()) + list(PROJECT_ALIASES.keys())
+                  if len(n) >= 4]
     matches = get_close_matches(tag_lower, candidates, n=1, cutoff=0.78)
     if matches:
         matched_lower = matches[0]
