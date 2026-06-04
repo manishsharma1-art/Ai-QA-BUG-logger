@@ -165,9 +165,17 @@ async def lifespan(app: FastAPI):
     )
     logger.info("✅ Google Chat client configured")
 
+    # Run RAG index build in a background thread so it never blocks the
+    # lifespan. Cloud Run's startup probe (4-min limit) passes immediately;
+    # the embeddings finish building in the background and /health.rag updates
+    # once ready.  Phase 1 requests that arrive before RAG is ready fall back
+    # to the static few-shot block (safe by design).
     try:
         from bug_retriever import init_retriever
-        init_retriever()
+        import asyncio
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(None, init_retriever)
+        logger.info("✅ RAG indexing started in background thread")
     except ImportError:
         logger.warning("bug_retriever module not importable — RAG disabled")
     except Exception as e:
