@@ -32,7 +32,7 @@ gcloud run deploy ${SERVICE_NAME} \
   --image ${IMAGE_NAME}:latest \
   --platform managed \
   --region ${REGION} \
-  --memory 2Gi \
+  --memory 4Gi \
   --cpu 1 \
   --min-instances 1 \
   --no-cpu-throttling \
