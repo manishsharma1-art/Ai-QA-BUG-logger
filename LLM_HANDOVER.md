@@ -2,7 +2,7 @@
 
 > **Purpose:** This document is written for any AI/LLM agent or developer that takes over development or maintenance of this codebase. Read this FIRST before making any changes.
 >
-> _Last updated: 2026-06-03 — after 6.6k corpus RAG retrieval was deployed._
+> _Last updated: 2026-06-04 — after 11.8k corpus RAG retrieval was deployed and GCP was cleaned up._
 
 ---
 
@@ -18,7 +18,7 @@
 | **Internal alias URL** | `https://qa-bugbot-mh76wysxxa-el.a.run.app` |
 | **Cloud Run project** | `artful-affinity-634`, region `asia-south1` |
 | **Service name** | `qa-bugbot` |
-| **Current revision** | `qa-bugbot-00055-vpc` (100% traffic, healthy) |
+| **Current revision** | `qa-bugbot-00059-xrv` (100% traffic, healthy) |
 | **Service account** | `qaautomation@artful-affinity-634.iam.gserviceaccount.com` |
 | **Stable git checkpoint** | `checkpoint-stable-rag-20260603` |
 | **Branch** | `feat/rag-6k-corpus` (merged-equivalent state, ahead of `main`) |
@@ -123,7 +123,7 @@ PHASE 2 — Async background task (15-50s)
 | `database.py` | SQLite + GCS sync with fail-closed safeguard | `get_user_by_chat_id()`, `create_or_update_user()`, `_download_db_from_gcs()`, `_upload_db_to_gcs()`, `_safe_upload_db_to_gcs()`, `get_last_gcs_sync()` |
 | `env_validator.py` | Startup env-var corruption canary | `validate_env_vars()` (5 checks), `read_build_marker()` |
 | `config.py` | Settings, `OP_PROJECTS` (34 projects), bug-type / priority / environment ID mappings | `get_settings()` |
-| `assets/training_examples.json` | 606 curated real tickets — source for the 50-example few-shot pack | (read by `gemini_client._load_few_shot_block`) |
+| `assets/training_examples.json` | 11,862 curated real tickets — source for RAG retrieval | (read by `bug_retriever.index`) |
 
 ---
 
@@ -246,7 +246,7 @@ gcloud run deploy qa-bugbot \
   --source . \
   --region asia-south1 \
   --no-cpu-throttling \
-  --memory 2Gi \
+  --memory 4Gi \
   --cpu 1 \
   --timeout 300 \
   --min-instances 1 \
@@ -258,7 +258,7 @@ gcloud run deploy qa-bugbot \
 ### Critical deployment nuances
 
 - `--no-cpu-throttling`: **Mandatory.** Cloud Run scales CPU to zero immediately after an HTTP response. Phase 2 uses `asyncio.create_task` to process media after the webhook ack returns, so without this flag the background task dies silently.
-- `--memory 2Gi`: Required for OpenCV to process up to 20 video frames in memory.
+- `--memory 4Gi`: Required to load and process the 11.8k entry RAG corpus embeddings on startup without throwing silent OOM errors, and for OpenCV video processing.
 - `--update-env-vars` value MUST be **comma-separated**, not space-separated. RC2 was caused by the space-separator concatenating `DEMO_SPACE_ID=...` into the API key value.
 - `service-account.json` MUST be in the source upload. It's `.gitignored` (so it never enters version control) but ALLOWED through `.gcloudignore` and `.dockerignore`. The v1 deploy attempt failed because this file was missing.
 - After the build completes, Cloud Run creates a new revision but may NOT auto-flip traffic if traffic was previously pinned. Force the flip:
@@ -323,7 +323,7 @@ Installed at `.git/hooks/pre-commit` from `scripts/hooks/pre-commit`. Scans stag
 
 1. **Never use `--set-env-vars` with space-separated values.** RC2 root cause. Always comma-separated, or use `--env-vars-file env.yaml`.
 2. **Never deploy without `--no-cpu-throttling`.** Phase 2 will silently die.
-3. **Never deploy without `--memory 2Gi`.** The `sentence-transformers` RAG embedder will OOM during background initialization.
+3. **Never deploy without `--memory 4Gi`.** The `sentence-transformers` RAG embedder will silently OOM during background initialization of the 11.8k corpus if given less memory.
 4. **Never re-add `service-account.json` to `.gcloudignore`/`.dockerignore`.** It's gitignored; the runtime needs it in the image.
 5. **Never modify `requirements.txt` to add new runtime deps without testing.** Use `requirements-dev.txt` for dev deps.
 6. **Never reduce video frame extraction below 20 frames per video.**
