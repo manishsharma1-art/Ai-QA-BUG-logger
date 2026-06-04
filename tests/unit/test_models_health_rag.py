@@ -14,7 +14,7 @@ def test_health_response_accepts_rag_field():
     rag_data = {
         "enabled": True,
         "index_outcome": "ok",
-        "corpus_size": 606,
+        "corpus_size": 11862,
         "embedding_dim": 384,
         "model_name": "sentence-transformers/all-MiniLM-L6-v2",
         "top_k": 5,

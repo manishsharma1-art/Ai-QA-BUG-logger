@@ -1,0 +1,8 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '--no-cache', '-t', 'gcr.io/artful-affinity-634/qa-bugbot:latest', '.']
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/artful-affinity-634/qa-bugbot:latest']
+images:
+  - 'gcr.io/artful-affinity-634/qa-bugbot:latest'
+timeout: '1200s'
