@@ -2,7 +2,7 @@
 
 > **Purpose:** This document is written for any AI/LLM agent or developer that takes over development or maintenance of this codebase. Read this FIRST before making any changes.
 >
-> _Last updated: 2026-05-30 — after the production reliability deploy went live and was checkpointed._
+> _Last updated: 2026-06-03 — after 6.6k corpus RAG retrieval was deployed._
 
 ---
 
@@ -18,13 +18,13 @@
 | **Internal alias URL** | `https://qa-bugbot-mh76wysxxa-el.a.run.app` |
 | **Cloud Run project** | `artful-affinity-634`, region `asia-south1` |
 | **Service name** | `qa-bugbot` |
-| **Current revision** | `qa-bugbot-00042-8zj` (100% traffic, healthy) |
+| **Current revision** | `qa-bugbot-00055-vpc` (100% traffic, healthy) |
 | **Service account** | `qaautomation@artful-affinity-634.iam.gserviceaccount.com` |
-| **Stable git checkpoint** | `checkpoint-stable-20260530` → commit `5002f50` |
-| **Branch** | `fix/production-reliability` (merged-equivalent state, ahead of `main`) |
+| **Stable git checkpoint** | `checkpoint-stable-rag-20260603` |
+| **Branch** | `feat/rag-6k-corpus` (merged-equivalent state, ahead of `main`) |
 | **Deploy command** | See §9 below — `gcloud run deploy qa-bugbot --source .` plus required flags |
-| **Rollback command** | `gcloud run services update-traffic qa-bugbot --region asia-south1 --to-revisions=qa-bugbot-00042-8zj=100` (when this revision is the rollback target) |
-| **Tests** | `pytest tests/unit -q` → 190 passed; `synthetic_webhook.py --scenario all` → 9/9 passed |
+| **Rollback command** | `gcloud run services update-traffic qa-bugbot --region asia-south1 --to-revisions=qa-bugbot-00055-vpc=100` (when this revision is the rollback target) |
+| **Tests** | `pytest tests/unit -q` → 236 passed; `synthetic_webhook.py --scenario all` → 10/10 passed |
 
 > The OLD `https://qa-bug-bot-542857204182.us-central1.run.app/...` URL is a dead deployment in a different region. Don't probe it.
 
@@ -185,6 +185,8 @@ Every external call emits a structured log line. Greppable in Cloud Run logs OR 
 | `LLM_CALL phase=<phase1/phase2/smoke/bucket_picker> outcome=<5 vals> duration_ms=…` | `gemini_client._log_llm_call` | 5 outcomes: `ok`, `auth_error`, `rate_limit`, `server_error`, `network_error`, `unknown_error`. |
 | `OP_CALL method=… url=… outcome=<5 vals> duration_ms=…` | `openproject_client._log_op_call` | 5 outcomes: `ok`, `client_error`, `server_error`, `network_error`, `unknown_error`. |
 | `PHASE2_TRUNCATED detections=… preview=…` | `gemini_client._clean_json_response` | Fires from BOTH Phase 1 and Phase 2 — the class name is historical. |
+| `RAG_INDEX outcome=<4 vals> source=<3 vals>` | `bug_retriever.index` | Outcomes: ok, cache_hit, cache_stale, disabled. Source: gcs, recompute, none. |
+| `RAG_RETRIEVE outcome=<5 vals> duration_ms=…` | `bug_retriever.retrieve` | Outcomes: ok, embed_error, short_brief, empty_corpus, index_unavailable. |
 | `PHASE2_DEFAULT_STUFFED reasons=…` | `gemini_client._detect_default_stuffing` | When the LLM returns ≥2 of 4 placeholder markers. |
 | `PHASE2_SLOW outcome=timeout duration_ms=50000 frames=N` | `gemini_client.enrich_with_media` | When `asyncio.wait_for` deadline trips. |
 | `PRIORITY_AMBIGUOUS:` | `models.validate_priority` | When a string matches both HIGH and LOW whitelists. |
@@ -244,19 +246,19 @@ gcloud run deploy qa-bugbot \
   --source . \
   --region asia-south1 \
   --no-cpu-throttling \
-  --memory 1Gi \
+  --memory 2Gi \
   --cpu 1 \
   --timeout 300 \
   --min-instances 1 \
   --max-instances 100 \
   --service-account qaautomation@artful-affinity-634.iam.gserviceaccount.com \
-  --update-env-vars "BUILD_MARKER=<sha>,DEFAULT_OPENPROJECT_API_KEY=<key>,DEMO_SPACE_ID=<id>"
+  --update-env-vars "BUILD_MARKER=<sha>,DEFAULT_OPENPROJECT_API_KEY=<key>,DEMO_SPACE_ID=<id>,RAG_ENABLED=true,RAG_TOPK=10,RAG_CACHE_GCS=true"
 ```
 
 ### Critical deployment nuances
 
 - `--no-cpu-throttling`: **Mandatory.** Cloud Run scales CPU to zero immediately after an HTTP response. Phase 2 uses `asyncio.create_task` to process media after the webhook ack returns, so without this flag the background task dies silently.
-- `--memory 1Gi`: Required for OpenCV to process up to 20 video frames in memory.
+- `--memory 2Gi`: Required for OpenCV to process up to 20 video frames in memory.
 - `--update-env-vars` value MUST be **comma-separated**, not space-separated. RC2 was caused by the space-separator concatenating `DEMO_SPACE_ID=...` into the API key value.
 - `service-account.json` MUST be in the source upload. It's `.gitignored` (so it never enters version control) but ALLOWED through `.gcloudignore` and `.dockerignore`. The v1 deploy attempt failed because this file was missing.
 - After the build completes, Cloud Run creates a new revision but may NOT auto-flip traffic if traffic was previously pinned. Force the flip:
@@ -285,7 +287,16 @@ Installed at `.git/hooks/pre-commit` from `scripts/hooks/pre-commit`. Scans stag
 
 ## 10. Recent Changes Worth Knowing About (2026-05-25 → 2026-05-30)
 
-### Production reliability deploy (this batch)
+### RAG-Augmented Few-Shot Retrieval (2026-06-02)
+
+- **Architecture:** Replaced the static 50-example few-shot prompt with a dynamic RAG retriever (`bug_retriever.py`) that uses `sentence-transformers/all-MiniLM-L6-v2` to fetch the top 5 most semantically similar tickets from the corpus.
+- **Cache Mechanism:** Embeddings are cached to `gs://qa-bugbot-data/embeddings.npz` and loaded on cold start to prevent ~15s recompute delays, verified via content hash.
+- **Fallbacks:** 4 layers of fallback ensure the webhook never fails due to RAG (stale cache → recompute, download fail → recompute, embed error → static block, import error → static block).
+- **Env Vars:** Controlled by `RAG_ENABLED` (master kill switch), `RAG_TOPK`, and `RAG_CACHE_GCS`.
+- **Latency:** Decreased Phase 1 median latency by >1500 ms compared to the old static 50-example prompt.
+- **`/health`:** Extended with a `.rag` sub-object detailing corpus size, model, cache source, and outcome.
+
+### Production reliability deploy (May 2026)
 
 - **RC1–RC8 closed**: stale image bypass, env-var corruption, silent GCS exceptions, Phase 2 truncation, bracket-tag stripping, priority substring match, `.env.example` real key, commit discipline.
 - **`/health` extended** with `last_gcs_sync` (8-outcome typed result) and `build_marker` fields.
@@ -312,7 +323,7 @@ Installed at `.git/hooks/pre-commit` from `scripts/hooks/pre-commit`. Scans stag
 
 1. **Never use `--set-env-vars` with space-separated values.** RC2 root cause. Always comma-separated, or use `--env-vars-file env.yaml`.
 2. **Never deploy without `--no-cpu-throttling`.** Phase 2 will silently die.
-3. **Never deploy without `--memory 1Gi`.** OpenCV will OOM.
+3. **Never deploy without `--memory 2Gi`.** The `sentence-transformers` RAG embedder will OOM during background initialization.
 4. **Never re-add `service-account.json` to `.gcloudignore`/`.dockerignore`.** It's gitignored; the runtime needs it in the image.
 5. **Never modify `requirements.txt` to add new runtime deps without testing.** Use `requirements-dev.txt` for dev deps.
 6. **Never reduce video frame extraction below 20 frames per video.**

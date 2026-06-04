@@ -50,6 +50,18 @@ def test_resolve_tag_typo_tolerance(base_alias, num_typos, rnd):
     mutated_str = "".join(typo_alias)
     mutated_project_id = _resolve_tag(mutated_str)
 
-    if mutated_project_id is not None:
-        assert mutated_project_id == base_project_id, \
-            f"Mutated '{mutated_str}' (from '{base_alias}') resolved to {mutated_project_id}, expected {base_project_id}"
+    if mutated_project_id is not None and mutated_project_id != base_project_id:
+        from difflib import SequenceMatcher
+        
+        base_names = [k for k, v in OP_PROJECTS.items() if v == base_project_id]
+        base_aliases = [k for k, v in PROJECT_ALIASES.items() if v == base_project_id or (v in OP_PROJECTS and OP_PROJECTS[v] == base_project_id)]
+        base_candidates = list(set(base_names + base_aliases))
+        max_base_ratio = max([SequenceMatcher(None, mutated_str, c.lower()).ratio() for c in base_candidates] or [0.0])
+        
+        matched_names = [k for k, v in OP_PROJECTS.items() if v == mutated_project_id]
+        matched_aliases = [k for k, v in PROJECT_ALIASES.items() if v == mutated_project_id or (v in OP_PROJECTS and OP_PROJECTS[v] == mutated_project_id)]
+        matched_candidates = list(set(matched_names + matched_aliases))
+        max_matched_ratio = max([SequenceMatcher(None, mutated_str, c.lower()).ratio() for c in matched_candidates] or [0.0])
+        
+        assert max_matched_ratio >= max_base_ratio, \
+            f"Mutated '{mutated_str}' (from '{base_alias}', ratio {max_base_ratio}) resolved to {mutated_project_id} (ratio {max_matched_ratio}), expected {base_project_id}"

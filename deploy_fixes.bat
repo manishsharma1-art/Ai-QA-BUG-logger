@@ -6,7 +6,7 @@ echo QA Bug Logger - Deploying Timeout Fixes
 echo ==========================================
 
 REM Configuration - UPDATE THESE
-set PROJECT_ID=your-gcp-project-id
+set PROJECT_ID=artful-affinity-634
 set REGION=asia-south1
 set SERVICE_NAME=qa-bugbot
 set IMAGE_NAME=gcr.io/%PROJECT_ID%/%SERVICE_NAME%
@@ -32,8 +32,11 @@ gcloud run deploy %SERVICE_NAME% ^
   --image %IMAGE_NAME%:latest ^
   --platform managed ^
   --region %REGION% ^
-  --memory 512Mi ^
+  --memory 2Gi ^
   --cpu 1 ^
+  --min-instances 1 ^
+  --no-cpu-throttling ^
+  --update-env-vars RAG_ENABLED=true,RAG_TOPK=10 ^
   --timeout 300 ^
   --max-instances 10
 if errorlevel 1 goto error

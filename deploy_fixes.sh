@@ -32,8 +32,11 @@ gcloud run deploy ${SERVICE_NAME} \
   --image ${IMAGE_NAME}:latest \
   --platform managed \
   --region ${REGION} \
-  --memory 512Mi \
+  --memory 2Gi \
   --cpu 1 \
+  --min-instances 1 \
+  --no-cpu-throttling \
+  --update-env-vars RAG_ENABLED=true,RAG_TOPK=10 \
   --timeout 300 \
   --max-instances 10
 

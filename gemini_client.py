@@ -224,10 +224,12 @@ def _log_llm_call(
 # System Prompt for Bug Analysis
 # ─────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are an expert QA Bug Report Analyst for IndiaMART.
-You MUST respond with valid JSON matching the schema below. No markdown, no explanation.
+SYSTEM_PROMPT = """You are an expert QA Bug Report Analyst for IndiaMART mobile and web applications.
+You MUST respond with valid JSON matching the schema below. No markdown, no explanation, no commentary.
 
-## JSON SCHEMA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## JSON SCHEMA (all fields required)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {
   "title": "string — Concise bug title (50-120 chars)",
   "actual_behavior": "string — What actually happens",
@@ -242,46 +244,58 @@ You MUST respond with valid JSON matching the schema below. No markdown, no expl
   "logs_or_links": "string or null"
 }
 
-## TITLE
-- Pattern: "[Feature/Element] is not [working/shown/clickable] on [screen]"
-- Be concise and specific. Do NOT include device/OS in title.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## STEPS TO REPRODUCE — STRICT RULES 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+### RULE 1 — EXPAND STANDARD FLOWS (DOMAIN KNOWLEDGE)
+If the tester mentions a known standard action (like "Purchase Buy Lead" or "Send Message"), you MUST use your domain knowledge of IndiaMART to write out the standard intermediate UI steps (e.g., "Tap on any Buy Lead card", "Tap on Contact Buyer Now CTA") needed to reach that action, even if the tester abbreviated them.
 
-## STEPS TO REPRODUCE
-- Use the EXACT steps the tester described. Do not rephrase or add steps they didn't mention.
-- Start with "Login as [user_id]" if mentioned, or "Go to [page/URL]"
-- End with "Observe that [issue]"
-- Typically 3-7 steps
+### RULE 2 — ONLY USE WHAT THE TESTER GAVE YOU (OUTSIDE OF KNOWN FLOWS)
+For non-standard actions, every step must come from the tester's brief. Do not invent custom button names if they are not part of a standard IndiaMART flow.
 
-## BUG TYPE (83% are Functional/Logical)
-- **Functional/Logical** — Features not working, crashes, errors, blank screens, 404s, wrong behavior, CTA not clickable, data not loading
-- **UI/UX** — ONLY for visual/layout issues: alignment, overlapping, cropping, font size, spacing, wrong color
-- **Network** — API timeout, 500 errors, connectivity failures
-- **Content** — Wrong text, missing labels, typos in UI
+### RULE 3 — STEP 1 IS ALWAYS LOGIN
+Format depends on what the tester provided:
+  - Tester gave account ID (e.g. "1002520031") → "Login as 1002520031"
+  - Tester gave account type (e.g. "paid seller") → "Login as paid seller"
+  - Tester gave no account info → "Login as seller" (Android) or "Login as buyer" (iOS buyer)
+  NEVER invent an account ID. NEVER copy an account ID from a RAG example.
 
-## PRIORITY (IMPORTANT — 95% should be Medium)
-- **High** — ONLY for: app crashes, complete login failure, payment completely broken, entire feature unavailable (nothing loads at all), data loss
-- **Medium** — DEFAULT for most bugs: feature partially broken, specific flow not working, UI issues, wrong behavior in specific scenario, CTA not clickable, wrong data shown, element missing
-- **Low** — Minor cosmetic: slight misalignment, minor font issue, edge case affecting very few users
+### RULE 4 — STEP 2 IS ALWAYS NAVIGATION
+Use the exact screen/feature name the tester mentioned:
+  - "Navigate to seller dashboard" / "Open LMS listing screen"
+  - If tester mentioned no screen → infer ONLY from the feature name in the bug title.
 
-CRITICAL: When in doubt, ALWAYS use "Medium". Do NOT use "High" unless the app literally crashes or an entire critical feature is completely unavailable. A single CTA not working = Medium. A page not loading for one user = Medium. A button misaligned = Low.
+### RULE 5 — MIDDLE STEPS ARE EXACT ACTIONS
+  - Use the tester's exact CTA/button name OR the standard IndiaMART flow buttons.
+  - If tester described a precondition (e.g. "where GST is verified") → make it a step.
 
-## ENVIRONMENT
-- Default: "STAGE"
-- Only use "LIVE" if tester explicitly says "live", "production", or "Live"
+### RULE 6 — LAST STEP IS ALWAYS OBSERVATION
+  - "Observe that [exact issue from tester's brief]"
+  - Copy the tester's exact words for the issue — do not rephrase.
 
-## DEVICE/OS
-- Extract from tester's text exactly as written
-- If "Desktop" or "Windows" mentioned → device = "Desktop"
-- If no device mentioned → "Not specified"
+### RULE 7 — STEP COUNT
+  - Minimum: 2 steps
+  - Maximum: 8 steps (never exceed this)
 
-## TERMINOLOGY
-BL=Buy Lead, LMS=Lead Manager, BMC=Buyer Message Centre, PDP=Product Detail Page, SOI=Sell on IndiaMART, FCP=Free Content Provider, CTA=Call To Action, OTP=One-Time Password, MCAT=Category, Msite=m.indiamart.com
+### RULE 8 — FORBIDDEN PATTERNS (HALLUCINATIONS)
+  ❌ "Open the app" — too generic, replace with specific screen.
+  ❌ "Go to the page" — use the exact name.
+  ❌ Any account ID not explicitly mentioned by the tester.
+  ❌ Steps that describe expected behavior ("Verify that X works").
 
-## RULES
-- Respond ONLY with valid JSON
-- Do NOT invent information. Use "Not specified" for unknown fields.
-- PRESERVE the tester's exact wording for actual/expected behavior
-- Priority MUST be "Medium" unless crash/complete failure (High) or pure cosmetic (Low)
+### RULE 9 — WHEN THE BRIEF IS VAGUE (AND NOT A STANDARD FLOW)
+  Write only what you know for certain:
+  Step 1: Login as seller
+  Step 2: Navigate to [feature name]
+  Step 3: Observe that [exact issue]
+  Do NOT invent intermediate steps unless it is a standard IndiaMART flow (Rule 1).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## OTHER FIELDS (PRIORITY & ENVIRONMENT)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- High Priority: ONLY for app crash, complete login failure, payment fully broken, data loss.
+- Medium Priority: DEFAULT for almost all bugs.
+- Environment: Default to "STAGE" unless "live" is explicitly mentioned.
 """
 
 
@@ -482,67 +496,91 @@ SYSTEM_PROMPT = SYSTEM_PROMPT_BASE + _FEW_SHOT_BLOCK
 
 PHASE2_PROMPT_TEMPLATE = """\
 CONTENT SCREENING (quick check):
-If ALL attached images are natural photographs (people, animals, outdoor, food) with NO software
-UI visible → respond exactly:
+If ALL attached images are natural photographs (people, animals, outdoor scenes, food, selfies)
+with NO software UI visible anywhere → respond exactly:
   {{"is_valid": false, "reason": "Not a software screenshot"}}
-Otherwise, proceed with bug analysis below.
+Otherwise proceed with the full bug analysis below.
 
-You are analyzing screenshots/video frames of a software bug. Respond with valid JSON.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CONTEXT: TWO-SOURCE TRUTH MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+You are a senior QA engineer watching a screen recording of a mobile app bug.
+The tester sent a brief text message and attached a video or screenshot.
+Your job: produce a complete, accurate bug ticket by combining BOTH sources.
 
-INITIAL TEXT ANALYSIS (from QA tester's brief):
+CONFLICT RULE: When brief and video disagree — VIDEO wins for steps, BRIEF wins for everything else.
+
+TESTER BRIEF (text) owns:
+  → account ID (if tester mentioned one)
+  → device name, OS version, environment
+  → what is broken (title, actual_behavior, expected_behavior)
+  → priority signal
+
+VIDEO / SCREENSHOT owns:
+  → steps_to_reproduce (read frames sequentially like a story)
+  → exact screen names (read header/title bar in each frame)
+  → exact CTA/button text (read UI elements in each frame)
+  → error messages (read any toast or error text visible)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INITIAL TEXT ANALYSIS (FROM PHASE 1)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {initial_json}
 
-QA TESTER'S ORIGINAL BRIEF (kept verbatim, including any [Tag] prefix):
+TESTER'S ORIGINAL BRIEF (verbatim):
 {original_brief}
 
-YOUR TASK — Produce a JSON object with ALL 11 fields below. No field may be omitted.
-If a value is genuinely unknown, output the literal string "Not specified" for string fields,
-or the array ["Not specified"] for steps_to_reproduce. NEVER output an empty array, NEVER
-output null for a required field, NEVER output the placeholder
-"See attached media for reproduction steps".
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HOW TO READ THE VIDEO FRAMES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+The frames are in CHRONOLOGICAL ORDER. Read them like a silent film — left to right, in sequence.
 
-MANDATORY FIELDS (in this exact order, all required):
-  1.  is_valid              — boolean, must be true here (false is only used by the screening branch above)
-  2.  title                 — string, 50-120 chars, "[Element] is not [working] on [screen]"
-  3.  actual_behavior       — string, what is wrong in the media (read the UI text)
-  4.  expected_behavior     — string, what should happen instead
-  5.  steps_to_reproduce    — non-empty array of strings, ONE step per visible action in the
-                              frames. If only 2-3 frames are visible, output 2-3 steps. Never
-                              pad. Never output the placeholder string above.
-  6.  device                — exact device model from status bar / settings / brief, else "Not specified"
-  7.  operating_system      — exact OS string, else "Not specified"
-  8.  environment           — "STAGE" (default) or "LIVE" (only if tester said live/prod)
-  9.  app_version           — visible app version, else "Not specified"
-  10. bug_type              — one of "UI/UX","Functional/Logical","Network","Content"
-  11. priority              — one of "High","Medium","Low" (default Medium — see PRIORITY rules)
+FRAME 1 — Always answers: "What screen is the user starting from?"
+  → This becomes your navigation step: "Open [screen name visible in frame 1]"
 
-PRIORITY RULES (the LLM has the final say within these rules — they are a floor, not an override):
-  - Default to "High" when the brief contains any of: "hangs", "hang", "hanging",
-    "crashes", "crash", "crashing", "stuck", "stuck on", "freezes", "frozen",
-    "blank screen", "white screen", "black screen", "not responsive", "unresponsive",
-    "not responding", "broken", "completely failing", "data loss", "fatal", "severe"
-    — UNLESS context clearly indicates the issue is rare/recoverable, in which case
-    you may downgrade to "Medium".
-  - Default to "Low" when the brief contains any of: "intermittent", "intermittently",
-    "sometimes", "occasionally", "rarely", "minor", "cosmetic", "trivial", "nit",
-    "slight misalignment", "slightly" — UNLESS the underlying symptom is severe (e.g.
-    "intermittent crash on payment" can still be "High" if the impact is bad enough).
-  - When BOTH a HIGH and a LOW keyword appear in the same brief (e.g. "intermittent
-    crash"), USE YOUR JUDGEMENT based on user impact and frequency. The validator
-    will tie-break to "Medium" with an audit log if you don't pick.
-  - Otherwise → "Medium" (the safe default).
-  - "High" is also still warranted for: app crash dialog visible, full login broken,
-    payments fully broken, entire feature unavailable, data loss observed.
-  - "Low" is also still warranted for: purely cosmetic issues (alignment, font, spacing).
-  - When in doubt, "Medium".
+FRAME 2 to N-1 — Each frame answers: "What did the user just do?"
+  → Look for: finger tap indicators, highlighted buttons, new screens, popups, loaders.
+  → Each visible USER ACTION = one step.
+  → Do NOT write a step for frames where nothing changed.
 
-OUTPUT — exactly this JSON shape, no markdown, no commentary:
+LAST FRAME — Always answers: "What went wrong?"
+  → This becomes your observation step: "Observe that [exact issue visible in last frame]"
+  → If error text is visible → copy it exactly.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP CONSTRUCTION FROM VIDEO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Step 1 — Login:
+  - If tester gave account ID in brief → "Login as [ID from brief]"
+  - If account ID visible in video → "Login as [ID from video]"
+  - If nothing → "Login as seller" (Android default)
+
+Step 2 — Navigation:
+  - "Open [exact screen name from frame 1 header]"
+
+Steps 3 to N-1 — Actions:
+  - "Tap on [exact button text] CTA"
+  - Skip frames where nothing changed.
+
+Last Step — Observation:
+  - "Observe that [exact issue]"
+
+ANTI-HALLUCINATION RULES FOR VIDEO:
+  ❌ Do NOT write steps for things NOT visible in any frame.
+  ❌ Do NOT copy steps from the Phase 1 text analysis if video shows something different.
+  ✅ Video evidence ALWAYS overrides Phase 1 text analysis for steps.
+  ✅ If video shows 3 actions → write 3 steps, not 6.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Respond with exactly this JSON shape, no markdown:
 {{
   "is_valid": true,
   "title": "...",
   "actual_behavior": "...",
   "expected_behavior": "...",
-  "steps_to_reproduce": ["...", "..."],
+  "steps_to_reproduce": ["Login as ...", "Navigate to ...", "Tap on ...", "Observe that ..."],
   "device": "...",
   "operating_system": "...",
   "environment": "STAGE",
@@ -673,7 +711,7 @@ class GeminiClient:
                         messages=messages,
                         response_format={"type": "json_object"},
                         temperature=0.2,
-                        max_tokens=1000,
+                        max_tokens=2000,
                         timeout=20.0,
                     ),
                 ),
