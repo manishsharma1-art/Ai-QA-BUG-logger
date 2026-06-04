@@ -173,7 +173,7 @@ class BugRetriever:
             f"Subject: {r['subject']}\nDescription: {r['description_raw']}"
             for r in rows
         ]
-        embeddings = self._model.encode(texts, batch_size=32, normalize_embeddings=True)
+        embeddings = self._model.encode(texts, batch_size=16, normalize_embeddings=True, show_progress_bar=False)
         return embeddings.astype(np.float32)
 
     def _embed_query_l2_normalized(self, query: str) -> np.ndarray:
@@ -277,49 +277,55 @@ class BugRetriever:
             return
 
         try:
-            rows = self._load_corpus_rows()
-        except Exception as e:
-            self._matrix = None
-            self._entries = []
-            self._emit_index_log(started_at, "corpus_load_failed", "none", 0, detail=f"{type(e).__name__}: {e}")
-            return
-            
-        if not rows:
-            self._matrix = None
-            self._entries = []
-            self._emit_index_log(started_at, "corpus_load_failed", "none", 0, detail="no valid entries in training_examples.json")
-            return
-
-        try:
-            self._model = self._load_model()
-        except Exception as e:
-            self._matrix = None
-            self._entries = []
-            self._emit_index_log(started_at, "model_load_failed", "none", 0, detail=f"{type(e).__name__}: {e}")
-            return
-
-        self._content_hash = self._compute_corpus_hash(rows)
-        
-        matrix = self._try_load_cache(self._content_hash)
-        if matrix is not None:
-            outcome, source = "cache_hit", "gcs"
-        else:
             try:
-                matrix = self._embed_rows_l2_normalized(rows)
+                rows = self._load_corpus_rows()
             except Exception as e:
                 self._matrix = None
                 self._entries = []
-                self._emit_index_log(started_at, "model_load_failed", "none", 0, detail=f"embed failed: {type(e).__name__}: {e}")
+                self._emit_index_log(started_at, "corpus_load_failed", "none", 0, detail=f"{type(e).__name__}: {e}")
                 return
-            
-            outcome = "cache_stale" if self._cache_existed_but_mismatched else "cache_miss"
-            source = "recompute"
-            self._try_upload_cache(matrix, self._content_hash)
+                
+            if not rows:
+                self._matrix = None
+                self._entries = []
+                self._emit_index_log(started_at, "corpus_load_failed", "none", 0, detail="no valid entries in training_examples.json")
+                return
 
-        self._matrix = matrix
-        self._entries = rows
-        self._project_id_array = np.array([r["project_id"] if r["project_id"] is not None else -1 for r in rows], dtype=np.int32)
-        self._emit_index_log(started_at, outcome, source, len(rows))
+            try:
+                self._model = self._load_model()
+            except Exception as e:
+                self._matrix = None
+                self._entries = []
+                self._emit_index_log(started_at, "model_load_failed", "none", 0, detail=f"{type(e).__name__}: {e}")
+                return
+
+            self._content_hash = self._compute_corpus_hash(rows)
+            
+            matrix = self._try_load_cache(self._content_hash)
+            if matrix is not None:
+                outcome, source = "cache_hit", "gcs"
+            else:
+                try:
+                    matrix = self._embed_rows_l2_normalized(rows)
+                except Exception as e:
+                    self._matrix = None
+                    self._entries = []
+                    self._emit_index_log(started_at, "model_load_failed", "none", 0, detail=f"embed failed: {type(e).__name__}: {e}")
+                    return
+                
+                outcome = "cache_stale" if self._cache_existed_but_mismatched else "cache_miss"
+                source = "recompute"
+                self._try_upload_cache(matrix, self._content_hash)
+
+            self._matrix = matrix
+            self._entries = rows
+            self._project_id_array = np.array([r["project_id"] if r["project_id"] is not None else -1 for r in rows], dtype=np.int32)
+            self._emit_index_log(started_at, outcome, source, len(rows))
+        except Exception as e:
+            self._matrix = None
+            self._entries = []
+            self._last_outcome = f"error: {type(e).__name__} - {str(e)}"
+            logger.error("Unexpected error in RAG index: %s", e, exc_info=True)
 
     def _finish(self, started_at: float, examples: list[RetrievedExample], outcome: str, k: int, project_filter: Optional[int], matched_in_project: int, phase: str) -> list[RetrievedExample]:
         self._emit_retrieve_log(started_at, phase, outcome, k, len(self._entries), project_filter, matched_in_project)
