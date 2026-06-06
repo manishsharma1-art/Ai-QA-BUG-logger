@@ -4,18 +4,23 @@ Uses per-user API keys for authentication.
 """
 
 import base64
-import logging
 import json
+import logging
 import time
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
 import httpx
 
-from models import ExtractedBugReport
 from config import (
-    OP_TYPE_BUG_ID, OP_PRIORITIES, OP_PROJECTS,
-    OP_BUG_TYPES, OP_ENVIRONMENTS, OP_BUCKET_CATEGORIES, get_settings,
+    OP_BUCKET_CATEGORIES,
+    OP_BUG_TYPES,
+    OP_ENVIRONMENTS,
+    OP_PRIORITIES,
+    OP_PROJECTS,
+    OP_TYPE_BUG_ID,
+    get_settings,
 )
+from models import ExtractedBugReport
 
 logger = logging.getLogger(__name__)
 
@@ -55,15 +60,21 @@ def _log_op_call(
             outcome = "unknown_error"
         logger.warning(
             'OP_CALL method=%s url=%s outcome=%s duration_ms=%d detail="%s: %s"',
-            method, url, outcome, duration_ms,
-            type(exc).__name__, str(exc)[:200],
+            method,
+            url,
+            outcome,
+            duration_ms,
+            type(exc).__name__,
+            str(exc)[:200],
         )
         return
     if response is None:
         # Defensive: shouldn't happen in normal flow.
         logger.warning(
             'OP_CALL method=%s url=%s outcome=unknown_error duration_ms=%d detail="no response"',
-            method, url, duration_ms,
+            method,
+            url,
+            duration_ms,
         )
         return
     sc = response.status_code
@@ -76,8 +87,12 @@ def _log_op_call(
     else:
         outcome = "unknown_error"
     logger.info(
-        'OP_CALL method=%s url=%s outcome=%s status_code=%d duration_ms=%d',
-        method, url, outcome, sc, duration_ms,
+        "OP_CALL method=%s url=%s outcome=%s status_code=%d duration_ms=%d",
+        method,
+        url,
+        outcome,
+        sc,
+        duration_ms,
     )
 
 
@@ -132,10 +147,14 @@ class OpenProjectClient:
                     "email": data.get("email"),
                     "status": data.get("status"),
                 }
-                logger.info(f"API key verified for user: {user_info['name']} (ID: {user_info['id']})")
+                logger.info(
+                    f"API key verified for user: {user_info['name']} (ID: {user_info['id']})"
+                )
                 return user_info
             else:
-                logger.warning(f"API key verification failed: HTTP {response.status_code}")
+                logger.warning(
+                    f"API key verification failed: HTTP {response.status_code}"
+                )
                 return None
 
         except Exception as e:
@@ -240,7 +259,11 @@ class OpenProjectClient:
                     # Falls back to platform.upper() only if the project_id has
                     # no entry in OP_PROJECTS (shouldn't happen).
                     project_name = next(
-                        (name for name, pid in OP_PROJECTS.items() if pid == project_id),
+                        (
+                            name
+                            for name, pid in OP_PROJECTS.items()
+                            if pid == project_id
+                        ),
                         bug_report.platform.value.upper(),
                     )
 
@@ -254,11 +277,25 @@ class OpenProjectClient:
                         "priority": bug_report.priority.value,
                         "platform": bug_report.platform.value,
                     }
-                else:
-                    error_detail = response.text
+                elif 400 <= response.status_code < 500:
+                    # 4xx = client error — the same request will NEVER succeed on retry.
+                    # Raise immediately to avoid duplicate tickets and wasted API calls.
+                    error_detail = response.text[:500]
                     logger.error(
-                        f"OpenProject API error (attempt {attempt}): "
-                        f"HTTP {response.status_code} — {error_detail}"
+                        "OpenProject client error (4xx — not retrying): HTTP %d — %s",
+                        response.status_code,
+                        error_detail,
+                    )
+                    raise RuntimeError(f"HTTP {response.status_code}: {error_detail}")
+                else:
+                    # 5xx or unexpected — log and allow retry
+                    error_detail = response.text[:500]
+                    logger.error(
+                        "OpenProject server error (attempt %d/%d): HTTP %d — %s",
+                        attempt,
+                        max_retries,
+                        response.status_code,
+                        error_detail,
                     )
                     last_error = f"HTTP {response.status_code}: {error_detail}"
 
@@ -277,9 +314,12 @@ class OpenProjectClient:
             # Wait before retry (exponential backoff)
             if attempt < max_retries:
                 import asyncio
-                await asyncio.sleep(2 ** attempt)
 
-        raise RuntimeError(f"Failed to create ticket after {max_retries} attempts: {last_error}")
+                await asyncio.sleep(2**attempt)
+
+        raise RuntimeError(
+            f"Failed to create ticket after {max_retries} attempts: {last_error}"
+        )
 
     def _format_description(self, bug: ExtractedBugReport) -> str:
         """Format the bug description in the team's standard markdown format."""
@@ -293,7 +333,7 @@ class OpenProjectClient:
 
         # Steps to Reproduce
         steps_text = "\n".join(
-            f"{i+1}.  {step}" for i, step in enumerate(bug.steps_to_reproduce)
+            f"{i + 1}.  {step}" for i, step in enumerate(bug.steps_to_reproduce)
         )
         sections.append(f"### **Steps to reproduce:**\n\n{steps_text}")
 
@@ -321,9 +361,7 @@ class OpenProjectClient:
         """Build Basic auth header for multipart form requests (no Content-Type)."""
         credentials = f"apikey:{api_key}"
         encoded = base64.b64encode(credentials.encode("ascii")).decode("ascii")
-        return {
-            "Authorization": f"Basic {encoded}"
-        }
+        return {"Authorization": f"Basic {encoded}"}
 
     async def attach_file_to_work_package(
         self,
@@ -337,42 +375,38 @@ class OpenProjectClient:
         Upload a file attachment to an existing work package.
         """
         headers = self._get_auth_header_multipart(api_key)
-        
-        # OpenProject requires metadata in addition to the file itself. 
+
+        # OpenProject requires metadata in addition to the file itself.
         # But for v3, we can post multipart with just the file or with metadata.
         # Simple multipart upload is supported.
-        files = {
-            'file': (file_name, file_data, content_type)
-        }
-        
+        files = {"file": (file_name, file_data, content_type)}
+
         # We optionally add the metadata as JSON to a 'metadata' field if required,
         # but OpenProject allows uploading directly if we specify the file.
         # Let's add metadata just in case.
         metadata = {
             "fileName": file_name,
-            "description": {"format": "plain", "raw": "Attached by QA Bug Logger"}
+            "description": {"format": "plain", "raw": "Attached by QA Bug Logger"},
         }
-        data = {
-            "metadata": (None, json.dumps(metadata), "application/json")
-        }
-        
+        data = {"metadata": (None, json.dumps(metadata), "application/json")}
+
         # Combine data and files into a single files dictionary for httpx
         multipart_data = {
-            'file': (file_name, file_data, content_type),
-            'metadata': (None, json.dumps(metadata), 'application/json')
+            "file": (file_name, file_data, content_type),
+            "metadata": (None, json.dumps(metadata), "application/json"),
         }
 
         try:
-            logger.info(f"Uploading attachment ({len(file_data)} bytes) to ticket #{ticket_id}...")
+            logger.info(
+                f"Uploading attachment ({len(file_data)} bytes) to ticket #{ticket_id}..."
+            )
             attach_url = f"{self.api_base}/work_packages/{ticket_id}/attachments"
             start_ts = time.time()
             response = None
             try:
                 async with httpx.AsyncClient(timeout=60.0) as client:
                     response = await client.post(
-                        attach_url,
-                        headers=headers,
-                        files=multipart_data
+                        attach_url, headers=headers, files=multipart_data
                     )
             except Exception as e:
                 _log_op_call("POST", attach_url, start_ts, exc=e)
@@ -381,18 +415,24 @@ class OpenProjectClient:
             _log_op_call("POST", attach_url, start_ts, response=response)
 
             if response.status_code in (200, 201):
-                logger.info(f"✅ Attachment uploaded successfully to ticket #{ticket_id}")
+                logger.info(
+                    f"✅ Attachment uploaded successfully to ticket #{ticket_id}"
+                )
                 return True
             else:
-                logger.error(f"Failed to attach file to ticket #{ticket_id}: HTTP {response.status_code} - {response.text}")
+                logger.error(
+                    f"Failed to attach file to ticket #{ticket_id}: HTTP {response.status_code} - {response.text}"
+                )
                 return False
         except Exception as e:
-            logger.error(f"Exception while uploading attachment to ticket #{ticket_id}: {e}")
+            logger.error(
+                f"Exception while uploading attachment to ticket #{ticket_id}: {e}"
+            )
             return False
 
     def _format_steps(self, steps: list) -> str:
         """Format steps to reproduce for customField4."""
-        return "\n".join(f"{i+1}. {step}" for i, step in enumerate(steps))
+        return "\n".join(f"{i + 1}. {step}" for i, step in enumerate(steps))
 
     async def check_health(self) -> bool:
         """Check if OpenProject API is accessible."""

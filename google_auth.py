@@ -8,10 +8,10 @@ import json
 import logging
 import os
 from functools import lru_cache
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, List, Optional
 
-from google.oauth2 import service_account
 from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,7 @@ class GoogleChatClient:
         self._credentials = None
         self._chat_service = None
         self._initialized = False
+        self._init_failed = False
         logger.info(f"GoogleChatClient configured with: {service_account_path}")
 
     def _ensure_initialized(self) -> None:
@@ -41,6 +42,9 @@ class GoogleChatClient:
             if self._credentials and self._credentials.expired:
                 self._credentials.refresh(GoogleAuthRequest())
             return
+
+        if self._init_failed:
+            return  # Permanently failed — don't retry on every call
 
         if not os.path.exists(self.service_account_path):
             logger.warning(
@@ -59,6 +63,7 @@ class GoogleChatClient:
             self._initialized = True
             logger.info("Google Chat API client initialized successfully.")
         except Exception as e:
+            self._init_failed = True
             logger.error(f"Failed to initialize Google Chat API client: {e}")
 
     async def send_message(
@@ -103,10 +108,12 @@ class GoogleChatClient:
                 kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
 
             # Run synchronous Google API call in thread executor
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
                 None,
-                lambda: self._chat_service.spaces().messages().create(**kwargs).execute(),
+                lambda: (
+                    self._chat_service.spaces().messages().create(**kwargs).execute()
+                ),
             )
             logger.info(f"Message sent to {space_name}")
             return result
@@ -142,14 +149,22 @@ class GoogleChatClient:
             attachment_name = attachment.get("name")
             if attachment_name:
                 try:
-                    loop = asyncio.get_event_loop()
+                    loop = asyncio.get_running_loop()
                     att_info = await loop.run_in_executor(
                         None,
-                        lambda: self._chat_service.spaces().messages().attachments().get(
-                            name=attachment_name,
-                        ).execute(),
+                        lambda: (
+                            self._chat_service.spaces()
+                            .messages()
+                            .attachments()
+                            .get(
+                                name=attachment_name,
+                            )
+                            .execute()
+                        ),
                     )
-                    resource_name = att_info.get("attachmentDataRef", {}).get("resourceName")
+                    resource_name = att_info.get("attachmentDataRef", {}).get(
+                        "resourceName"
+                    )
                 except Exception as e:
                     logger.error(f"Failed to get attachment info: {e}")
                     return None
@@ -160,12 +175,16 @@ class GoogleChatClient:
 
         try:
             # Download media content
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             media = await loop.run_in_executor(
                 None,
-                lambda: self._chat_service.media().download(
-                    resourceName=resource_name,
-                ).execute(),
+                lambda: (
+                    self._chat_service.media()
+                    .download(
+                        resourceName=resource_name,
+                    )
+                    .execute()
+                ),
             )
             content_type = attachment.get("contentType", "unknown")
             logger.info(f"Downloaded attachment: {content_type}, {len(media)} bytes")
@@ -177,6 +196,7 @@ class GoogleChatClient:
             # Fallback: try using httpx with bearer token
             try:
                 import httpx
+
                 self._credentials.refresh(GoogleAuthRequest())
                 headers = {"Authorization": f"Bearer {self._credentials.token}"}
 
@@ -187,14 +207,20 @@ class GoogleChatClient:
                     )
 
                 if response.status_code == 200:
-                    logger.info(f"Downloaded attachment via httpx fallback: {len(response.content)} bytes")
+                    logger.info(
+                        f"Downloaded attachment via httpx fallback: {len(response.content)} bytes"
+                    )
                     return response.content
                 else:
-                    logger.error(f"Attachment download fallback failed: HTTP {response.status_code}")
+                    logger.error(
+                        f"Attachment download fallback failed: HTTP {response.status_code}"
+                    )
                     return None
 
             except Exception as fallback_error:
-                logger.error(f"Attachment download fallback also failed: {fallback_error}")
+                logger.error(
+                    f"Attachment download fallback also failed: {fallback_error}"
+                )
                 return None
 
     def is_available(self) -> bool:

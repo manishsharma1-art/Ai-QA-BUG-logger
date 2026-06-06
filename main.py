@@ -8,37 +8,41 @@ Deployed at: https://qa-bug-bot-542857204182.us-central1.run.app
 """
 
 import asyncio
+import collections
 import logging
 import re
 import time
 from collections import OrderedDict
-from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List
-
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
-from config import get_settings
-from env_validator import validate_env_vars, read_build_marker
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import ValidationError
+
 from bucket_router import (
     extract_bucket_from_message,
     extract_bucket_with_provenance,
 )
+from config import get_settings
 from database import (
-    init_database, close_database, check_database_health,
-    get_user_by_chat_id, create_or_update_user,
+    check_database_health,
+    close_database,
+    create_or_update_user,
+    get_user_by_chat_id,
+    init_database,
 )
+from env_validator import read_build_marker, validate_env_vars
 from gemini_client import GeminiClient
-from openproject_client import OpenProjectClient
 from google_auth import GoogleChatClient
 from models import (
-    UserRegistrationRequest, UserRegistrationResponse,
-    HealthResponse, ExtractedBugReport
+    ExtractedBugReport,
+    HealthResponse,
+    UserRegistrationRequest,
+    UserRegistrationResponse,
 )
-
-import collections
-from pydantic import ValidationError
+from openproject_client import OpenProjectClient
 
 # ─────────────────────────────────────────────
 # Logging Setup
@@ -54,12 +58,16 @@ logger = logging.getLogger("qa_bugbot")
 # In-memory log capture for debugging without GCP console access
 _log_capture = collections.deque(maxlen=200)
 
+
 class MemoryLogHandler(logging.Handler):
     def emit(self, record):
         _log_capture.append(self.format(record))
 
+
 memory_handler = MemoryLogHandler()
-memory_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s"))
+memory_handler.setFormatter(
+    logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s")
+)
 logger.addHandler(memory_handler)
 
 
@@ -77,6 +85,15 @@ chat_client: Optional[GoogleChatClient] = None
 _processed_messages: OrderedDict = OrderedDict()
 DEDUP_TTL_SECONDS = 300
 
+# Per-user rate limit — max 1 bug report per N seconds per sender
+# Prevents a single user from hammering the LLM/OpenProject APIs
+_user_rate: Dict[str, float] = {}
+RATE_LIMIT_WINDOW_SECONDS = 5
+
+# Hard ceiling on raw text length accepted from a webhook message.
+# Prevents token-cost attacks and protects LLM context window.
+MAX_BUG_REPORT_CHARS = 5_000
+
 # Strong references for asyncio tasks to prevent garbage collection
 _active_background_tasks = set()
 
@@ -92,10 +109,10 @@ _build_marker: str = ""
 _llm_smoke_result: Optional[Dict[str, Any]] = None
 
 
-
 # ─────────────────────────────────────────────
 # App Lifecycle
 # ─────────────────────────────────────────────
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -122,7 +139,9 @@ async def lifespan(app: FastAPI):
             base_url=settings.llm_base_url,
             model=settings.llm_model,
         )
-        logger.info(f"✅ LLM client initialized: {settings.llm_model} @ {settings.llm_base_url}")
+        logger.info(
+            f"✅ LLM client initialized: {settings.llm_model} @ {settings.llm_base_url}"
+        )
 
         # Gateway smoke test — catches an invalid/rotated key BEFORE traffic
         # hits a webhook. Result stored in module-level _llm_smoke_result and
@@ -165,22 +184,32 @@ async def lifespan(app: FastAPI):
     )
     logger.info("✅ Google Chat client configured")
 
-    # Run RAG index build in a background thread so it never blocks the
-    # lifespan. Cloud Run's startup probe (4-min limit) passes immediately;
-    # the embeddings finish building in the background and /health.rag updates
-    # once ready.  Phase 1 requests that arrive before RAG is ready fall back
+    # Run both RAG indexes in background threads — never blocks startup.
+    # Phase 1 requests that arrive before indexing completes fall back
     # to the static few-shot block (safe by design).
+    loop = asyncio.get_running_loop()
+
     try:
         from bug_retriever import init_retriever
-        import asyncio
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, init_retriever)
-        logger.info("✅ RAG indexing started in background thread")
-    except ImportError:
-        logger.warning("bug_retriever module not importable — RAG disabled")
-    except Exception as e:
-        logger.error("RAG init unexpected failure: %s", e, exc_info=True)
 
+        loop.run_in_executor(None, init_retriever)
+        logger.info("✅ Bug-corpus RAG indexing started in background thread")
+    except ImportError:
+        logger.warning("bug_retriever module not importable — bug RAG disabled")
+    except Exception as e:
+        logger.error("Bug RAG init unexpected failure: %s", e, exc_info=True)
+
+    try:
+        from testlink_retriever import init_testlink_retriever
+
+        loop.run_in_executor(None, init_testlink_retriever)
+        logger.info("✅ TestLink RAG indexing started in background thread")
+    except ImportError:
+        logger.warning(
+            "testlink_retriever module not importable — TestLink RAG disabled"
+        )
+    except Exception as e:
+        logger.error("TestLink RAG init unexpected failure: %s", e, exc_info=True)
 
     logger.info("🚀 Bot is ready!")
     logger.info("=" * 60)
@@ -206,48 +235,179 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Restrict to Google Chat's origin — this service is not a browser-facing API
+    allow_origins=["https://chat.googleapis.com"],
+    allow_methods=["POST", "GET"],
+    allow_headers=["Authorization", "Content-Type", "X-Internal-Token"],
 )
+
+
+# ─────────────────────────────────────────────
+# Security helpers
+# ─────────────────────────────────────────────
+
+
+async def _verify_webhook_auth(request: Request) -> bool:
+    """
+    Verify the Google Chat JWT bearer token in the Authorization header.
+
+    Google Chat POSTs to the webhook with:
+        Authorization: Bearer <Google-signed OIDC token>
+
+    We validate the signature and confirm:
+      - The token was issued by Google (accounts.google.com)
+      - The audience matches our Cloud Run URL
+      - The issuer email comes from Google Chat's system service account
+
+    If WEBHOOK_AUDIENCE is not configured → verification is skipped
+    (backward-compat for local development).
+    """
+    audience = settings.webhook_audience
+    if not audience:
+        logger.debug(
+            "WEBHOOK_AUDIENCE not set — skipping webhook JWT verification (dev mode)"
+        )
+        return True
+
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        logger.warning("Webhook request missing Bearer token — dropping")
+        return False
+
+    token = auth_header[len("Bearer ") :].strip()
+    try:
+        from google.auth.transport.requests import Request as _GoogleRequest
+        from google.oauth2 import id_token as _id_token
+
+        loop = asyncio.get_running_loop()
+        id_info = await loop.run_in_executor(
+            None,
+            lambda: _id_token.verify_oauth2_token(
+                token, _GoogleRequest(), audience=audience
+            ),
+        )
+        email = id_info.get("email", "")
+        if not email.endswith("@system.gserviceaccount.com"):
+            logger.warning("Webhook auth: unexpected token email %s — dropping", email)
+            return False
+        return True
+    except Exception as exc:
+        logger.warning("Webhook auth verification failed: %s", type(exc).__name__)
+        return False
+
+
+def _check_internal_token(request: Request) -> bool:
+    """
+    Check the X-Internal-Token header (or Authorization Bearer) against
+    settings.internal_api_token.  If no token is configured → allow (dev mode).
+    """
+    token = settings.internal_api_token
+    if not token:
+        return True  # No token configured — open in dev mode
+    provided = (
+        request.headers.get("X-Internal-Token", "")
+        or request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    )
+    return provided == token
+
+
+def _is_rate_limited(sender_name: str) -> bool:
+    """
+    Returns True if this sender submitted a bug report too recently.
+    Evicts stale entries (>60 s) on each call to prevent unbounded growth.
+    """
+    now = time.time()
+    stale = [k for k, v in _user_rate.items() if now - v > 60]
+    for k in stale:
+        del _user_rate[k]
+
+    last = _user_rate.get(sender_name, 0.0)
+    if now - last < RATE_LIMIT_WINDOW_SECONDS:
+        return True
+    _user_rate[sender_name] = now
+    return False
+
+
+def _sanitize_text(text: str) -> str:
+    """
+    Strip ASCII control characters (null bytes, ESC, etc.) from user input
+    before it is injected into the LLM prompt.  Keeps printable characters,
+    newlines (\n) and tabs (\t) so bug descriptions remain readable.
+    Truncates to MAX_BUG_REPORT_CHARS as a second line of defence.
+    """
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    return cleaned[:MAX_BUG_REPORT_CHARS]
 
 
 # ─────────────────────────────────────────────
 # Health Check
 # ─────────────────────────────────────────────
 
-@app.get("/health", response_model=HealthResponse)
+
+@app.get("/health")
 async def health_check():
-    """Check health of all services."""
+    """
+    Public health probe — used by Cloud Run uptime checks and load balancers.
+    Returns only minimal status so infrastructure details are not exposed.
+    Full details (GCS sync, build marker, RAG state, LLM model) are at
+    GET /health/details (requires X-Internal-Token header).
+    """
     from database import get_last_gcs_sync
 
     db_ok = await check_database_health()
-    # llm_ok is now driven by the startup smoke test outcome, not just whether
-    # gemini_client was constructed. A wrong/rotated key produces gemini=auth_error
-    # rather than the misleading gemini=configured the deployed code returns.
+
     llm_outcome: str
     if gemini_client is None:
         llm_outcome = "not_configured"
     elif _llm_smoke_result is None:
-        # Should not happen after lifespan completes, but be defensive.
         llm_outcome = "unknown"
     else:
         llm_outcome = _llm_smoke_result["outcome"]
     llm_ok = llm_outcome == "ok"
 
-    # Populate last_gcs_sync snapshot (Theme 2.3 / task 8.2)
     gcs_sync = get_last_gcs_sync()
-    gcs_sync_dict = gcs_sync.model_dump(mode="json") if gcs_sync else None
-
-    # Degraded rule: if last GCS sync outcome is not ok or skipped, report degraded
     gcs_ok = gcs_sync is None or gcs_sync.outcome in ("ok", "skipped")
     is_healthy = db_ok and llm_ok and gcs_ok
 
-    # RAG retriever snapshot (Theme 4 / task 7.2). Never affects /health.status —
-    # retrieval degradation is best-effort and falls back to the static block.
+    return {
+        "status": "healthy" if is_healthy else "degraded",
+        "database": "connected" if db_ok else "disconnected",
+        "gemini": llm_outcome,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/health/details", response_model=HealthResponse)
+async def health_check_details(request: Request):
+    """
+    Full health snapshot with infrastructure details.
+    Requires X-Internal-Token header (or Authorization: Bearer <token>)
+    matching the INTERNAL_API_TOKEN env var.
+    """
+    if not _check_internal_token(request):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    from database import get_last_gcs_sync
+
+    db_ok = await check_database_health()
+    llm_outcome: str
+    if gemini_client is None:
+        llm_outcome = "not_configured"
+    elif _llm_smoke_result is None:
+        llm_outcome = "unknown"
+    else:
+        llm_outcome = _llm_smoke_result["outcome"]
+    llm_ok = llm_outcome == "ok"
+
+    gcs_sync = get_last_gcs_sync()
+    gcs_sync_dict = gcs_sync.model_dump(mode="json") if gcs_sync else None
+    gcs_ok = gcs_sync is None or gcs_sync.outcome in ("ok", "skipped")
+    is_healthy = db_ok and llm_ok and gcs_ok
+
     rag_dict: Optional[dict] = None
     try:
         from bug_retriever import get_retriever
+
         retriever = get_retriever()
         if retriever is not None:
             rag_dict = retriever.to_health_dict()
@@ -288,15 +448,23 @@ async def health_check():
         rag=rag_dict,
     )
 
+
 @app.get("/logs")
-async def get_logs():
-    """Return recent logs for debugging."""
+async def get_logs(request: Request):
+    """
+    Return recent in-memory logs for debugging.
+    Requires X-Internal-Token header (or Authorization: Bearer <token>)
+    matching the INTERNAL_API_TOKEN env var.
+    """
+    if not _check_internal_token(request):
+        raise HTTPException(status_code=403, detail="Forbidden")
     return {"logs": list(_log_capture)}
 
 
 # ─────────────────────────────────────────────
 # User Registration (REST API)
 # ─────────────────────────────────────────────
+
 
 @app.post("/register", response_model=UserRegistrationResponse)
 async def register_user(request: UserRegistrationRequest):
@@ -327,6 +495,7 @@ async def register_user(request: UserRegistrationRequest):
 # Google Chat Webhook
 # ─────────────────────────────────────────────
 
+
 @app.post("/webhook")
 async def webhook(request: Request, background_tasks: BackgroundTasks):
     """
@@ -335,6 +504,12 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     - Standard Google Chat App format  {type, message, space}
     - Google Workspace Add-on format   {commonEventObject, chat: {messagePayload, user, space}}
     """
+    # ── Verify the request comes from Google Chat (JWT audience check) ──
+    if not await _verify_webhook_auth(request):
+        # Return empty 200 rather than 401 to avoid surfacing error messages
+        # to real Google Chat users whose requests are always signed.
+        return {}
+
     event = await request.json()
     logger.info(f"Webhook raw keys: {list(event.keys())}")
 
@@ -350,21 +525,17 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
         chat_user = addon_chat.get("user", {}) or {}
         sender_name = (
-            chat_user.get("name") or 
-            msg_obj.get("sender", {}).get("name") or 
-            "users/unknown"
+            chat_user.get("name")
+            or msg_obj.get("sender", {}).get("name")
+            or "users/unknown"
         )
         display_name = (
-            chat_user.get("displayName") or 
-            msg_obj.get("sender", {}).get("displayName") or 
-            common.get("userLocale", "User")
+            chat_user.get("displayName")
+            or msg_obj.get("sender", {}).get("displayName")
+            or common.get("userLocale", "User")
         )
         # argumentText is on message object (confirmed from real Google Chat payload)
-        text = (
-            msg_obj.get("argumentText")
-            or msg_obj.get("text")
-            or ""
-        ).strip()
+        text = (msg_obj.get("argumentText") or msg_obj.get("text") or "").strip()
         attachments = msg_obj.get("attachment", [])
         message_name = msg_obj.get("name", f"addon-msg-{int(time.time())}")
         # space is inside messagePayload (confirmed from real payload)
@@ -376,15 +547,13 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         def _addon_response(resp: dict) -> dict:
             return {
                 "hostAppDataAction": {
-                    "chatDataAction": {
-                        "createMessageAction": {
-                            "message": resp
-                        }
-                    }
+                    "chatDataAction": {"createMessageAction": {"message": resp}}
                 }
             }
 
-        logger.info(f"[Add-on] event={addon_event_type} from {display_name} ({sender_name}): {text[:100]}")
+        logger.info(
+            f"[Add-on] event={addon_event_type} from {display_name} ({sender_name}): {text[:100]}"
+        )
 
         welcome_text = (
             "\U0001f44b **Hi! I'm the AI Bug Logger Bot.**\n\n"
@@ -427,7 +596,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         if clean_text.startswith("/status"):
             res = await _handle_status(sender_name, display_name)
             return _addon_response(res)
-        res = await _handle_bug_report(synthetic_event, text, sender_name, display_name, background_tasks)
+        res = await _handle_bug_report(
+            synthetic_event, text, sender_name, display_name, background_tasks
+        )
         return _addon_response(res)
 
     # ── Standard Google Chat App format ──
@@ -454,10 +625,10 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
     message = event.get("message", {})
     sender = message.get("sender", {})
-    sender_name = sender.get("name", "")         # e.g. "users/123456789"
+    sender_name = sender.get("name", "")  # e.g. "users/123456789"
     display_name = sender.get("displayName", "User")
     message_name = message.get("name", "")
-    
+
     space = event.get("space", {})
     space_type = space.get("type", "")
 
@@ -476,7 +647,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         return {}
 
     clean_text = text.lower().strip()
-    
+
     # ── Command: /help or Greetings ──
     if clean_text in ["hi", "hello", "hey", "help", "bot", "/help"]:
         return _get_help_response()
@@ -490,12 +661,15 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         return await _handle_status(sender_name, display_name)
 
     # ── Bug Report ──
-    return await _handle_bug_report(event, text, sender_name, display_name, background_tasks)
+    return await _handle_bug_report(
+        event, text, sender_name, display_name, background_tasks
+    )
 
 
 # ─────────────────────────────────────────────
 # Command Handlers
 # ─────────────────────────────────────────────
+
 
 def _get_help_response() -> Dict[str, str]:
     """Return help message."""
@@ -617,32 +791,53 @@ async def _handle_status(sender_name: str, display_name: str) -> Dict[str, str]:
 # Phrases that indicate the AI recognized the input as NOT a valid bug report,
 # even though it returned a full ExtractedBugReport instead of {"is_valid": false}.
 _REJECTION_PHRASES = [
-    "irrelevant input", "no bug report", "not a bug", "not a valid bug",
-    "not a software", "not an app", "no bug found", "no issue found",
-    "does not contain", "do not contain", "outdoor scene", "not related to",
-    "not a screenshot", "not an app screenshot", "natural photograph",
-    "camera photo", "real-world", "no actionable bug", "cannot identify a bug",
-    "no software bug", "not related to any software", "unrelated to",
-    "not a product screenshot", "random object", "not a screen recording",
+    "irrelevant input",
+    "no bug report",
+    "not a bug",
+    "not a valid bug",
+    "not a software",
+    "not an app",
+    "no bug found",
+    "no issue found",
+    "does not contain",
+    "do not contain",
+    "outdoor scene",
+    "not related to",
+    "not a screenshot",
+    "not an app screenshot",
+    "natural photograph",
+    "camera photo",
+    "real-world",
+    "no actionable bug",
+    "cannot identify a bug",
+    "no software bug",
+    "not related to any software",
+    "unrelated to",
+    "not a product screenshot",
+    "random object",
+    "not a screen recording",
 ]
+
 
 def _is_rejection_report(report) -> tuple:
     """
     Check if an ExtractedBugReport's content actually indicates the AI
     is rejecting the input (not a real bug), even though it returned
     a full report structure instead of {"is_valid": false}.
-    
+
     Returns (is_rejected: bool, reason: str)
     """
     fields_to_check = [
-        getattr(report, 'title', ''),
-        getattr(report, 'actual_behavior', ''),
+        getattr(report, "title", ""),
+        getattr(report, "actual_behavior", ""),
     ]
     for field in fields_to_check:
-        field_lower = field.lower() if field else ''
+        field_lower = field.lower() if field else ""
         for phrase in _REJECTION_PHRASES:
             if phrase in field_lower:
-                logger.info(f"Rejection detected in report field: '{phrase}' found in '{field[:100]}'")
+                logger.info(
+                    f"Rejection detected in report field: '{phrase}' found in '{field[:100]}'"
+                )
                 return True, field
     return False, ""
 
@@ -650,6 +845,7 @@ def _is_rejection_report(report) -> tuple:
 # ─────────────────────────────────────────────
 # Bug Report Processing
 # ─────────────────────────────────────────────
+
 
 async def _handle_bug_report(
     event: Dict,
@@ -673,15 +869,42 @@ async def _handle_bug_report(
     thread_name = message.get("thread", {}).get("name", "")
     attachments = message.get("attachment", [])
 
+    # ── Rate limit: max 1 bug report per RATE_LIMIT_WINDOW_SECONDS per user ──
+    if _is_rate_limited(sender_name):
+        return {
+            "text": (
+                f"⚠️ **Too many requests.**\n\n"
+                f"Please wait {RATE_LIMIT_WINDOW_SECONDS} seconds between bug reports."
+            )
+        }
+
+    # ── Hard cap on raw text length (token cost guard) ──
+    if len(text) > MAX_BUG_REPORT_CHARS:
+        return {
+            "text": (
+                f"⚠️ **Message too long** ({len(text):,} chars).\n\n"
+                f"Please keep your bug report under {MAX_BUG_REPORT_CHARS:,} characters."
+            )
+        }
+
+    # ── Sanitize text — strip control chars before LLM injection ──
+    text = _sanitize_text(text)
+
     # Check if user is registered, otherwise fallback to space default
     user = await get_user_by_chat_id(sender_name)
     user_api_key = None
 
     if user:
         user_api_key = user.openproject_api_key
-    elif settings.default_openproject_api_key and settings.demo_space_id and settings.demo_space_id in space_name:
+    elif (
+        settings.default_openproject_api_key
+        and settings.demo_space_id
+        and settings.demo_space_id in space_name
+    ):
         user_api_key = settings.default_openproject_api_key
-        logger.info(f"User {display_name} not registered. Falling back to DEFAULT_OPENPROJECT_API_KEY in Demo Space.")
+        logger.info(
+            f"User {display_name} not registered. Falling back to DEFAULT_OPENPROJECT_API_KEY in Demo Space."
+        )
     else:
         return {
             "text": (
@@ -697,12 +920,12 @@ async def _handle_bug_report(
         return {
             "text": "❌ AI service is not configured. Please contact the administrator."
         }
-    
+
     # ── Validate Bug Report Checkpoints ──
-    
+
     # Check 1: Reject link-only messages (URLs with no real description)
-    url_pattern = re.compile(r'https?://\S+')
-    text_without_urls = url_pattern.sub('', text).strip()
+    url_pattern = re.compile(r"https?://\S+")
+    text_without_urls = url_pattern.sub("", text).strip()
     if text_without_urls and len(text_without_urls) < 15 and not attachments:
         return {
             "text": (
@@ -715,7 +938,7 @@ async def _handle_bug_report(
                 "Device: Samsung S23, OS: Android 15'_"
             )
         }
-    
+
     # Check 2: Short text with no media
     if len(text.strip()) < 20 and not attachments:
         return {
@@ -726,7 +949,7 @@ async def _handle_bug_report(
                 "2. A video or screenshot attachment."
             )
         }
-    
+
     # Check 3: Media-only with no meaningful text — ask for context
     if attachments and len(text.strip()) < 10:
         return {
@@ -742,7 +965,9 @@ async def _handle_bug_report(
     start_time = time.time()
 
     # ── Bucket Routing (Python — no LLM by default) ──
-    target_project_id, text_for_llm, routing_provenance = extract_bucket_with_provenance(text)
+    target_project_id, text_for_llm, routing_provenance = (
+        extract_bucket_with_provenance(text)
+    )
     logger.info(
         f"Bucket routing: project_id={target_project_id}, "
         f"provenance={routing_provenance}, text_for_llm='{text_for_llm[:80]}'"
@@ -752,11 +977,18 @@ async def _handle_bug_report(
     # signal anywhere, fall back to a one-shot LLM bucket picker. This catches
     # cases where QA mentions a project by a name we don't have an alias for
     # (audit May 2026 — Model Product Library, Msite SOI, Export, etc.).
-    if routing_provenance == "default" and gemini_client is not None and len(text.strip()) >= 20:
+    if (
+        routing_provenance == "default"
+        and gemini_client is not None
+        and len(text.strip()) >= 20
+    ):
         from config import OP_PROJECTS as _OP_PROJECTS
+
         try:
             picked = await asyncio.wait_for(
-                gemini_client.pick_bucket(text, list(_OP_PROJECTS.keys()), timeout_s=6.0),
+                gemini_client.pick_bucket(
+                    text, list(_OP_PROJECTS.keys()), timeout_s=6.0
+                ),
                 timeout=8.0,
             )
         except (asyncio.TimeoutError, Exception) as _e:
@@ -767,24 +999,31 @@ async def _handle_bug_report(
             routing_provenance = "llm_fallback"
             logger.info(
                 "Bucket routing: LLM picker → project %s (%d)",
-                picked, target_project_id,
+                picked,
+                target_project_id,
             )
 
     # ── Phase 1: Text analysis (always runs inline, ~5-10s) ──
     try:
         logger.info(f"Phase 1 INLINE: Analyzing text from {display_name}...")
         initial_report = await asyncio.wait_for(
-            gemini_client.analyze_text_brief(text_for_llm, project_id=target_project_id),
-            timeout=25.0  # Must fit within webhook response window
+            gemini_client.analyze_text_brief(
+                text_for_llm, project_id=target_project_id
+            ),
+            timeout=25.0,  # Must fit within webhook response window
         )
         elapsed_p1 = round(time.time() - start_time, 1)
         logger.info(f"✅ Phase 1 complete in {elapsed_p1}s: {initial_report.title}")
     except ValidationError as ve:
         logger.error(f"Phase 1 Pydantic validation failed: {ve}", exc_info=True)
         if attachments:
-            logger.info("Phase 1 validation failed, but media is present. Using QA text as fallback.")
+            logger.info(
+                "Phase 1 validation failed, but media is present. Using QA text as fallback."
+            )
             initial_report = ExtractedBugReport(
-                title=text_for_llm[:120] if len(text_for_llm) > 20 else "Bug reported with media attachment",
+                title=text_for_llm[:120]
+                if len(text_for_llm) > 20
+                else "Bug reported with media attachment",
                 actual_behavior=text_for_llm,
                 expected_behavior="Expected behavior not specified. See attached media.",
                 steps_to_reproduce=["See attached media for reproduction steps"],
@@ -795,7 +1034,7 @@ async def _handle_bug_report(
                 bug_type="Functional/Logical",
                 priority="Medium",
                 platform="Android",
-                logs_or_links=None
+                logs_or_links=None,
             )
         else:
             return {
@@ -808,9 +1047,13 @@ async def _handle_bug_report(
     except Exception as e:
         logger.error(f"Phase 1 failed: {e}", exc_info=True)
         if attachments:
-            logger.info("Phase 1 failed, but media is present. Using QA text as fallback.")
+            logger.info(
+                "Phase 1 failed, but media is present. Using QA text as fallback."
+            )
             initial_report = ExtractedBugReport(
-                title=text_for_llm[:120] if len(text_for_llm) > 20 else "Bug reported with media attachment",
+                title=text_for_llm[:120]
+                if len(text_for_llm) > 20
+                else "Bug reported with media attachment",
                 actual_behavior=text_for_llm,
                 expected_behavior="Expected behavior not specified. See attached media.",
                 steps_to_reproduce=["See attached media for reproduction steps"],
@@ -821,13 +1064,14 @@ async def _handle_bug_report(
                 bug_type="Functional/Logical",
                 priority="Medium",
                 platform="Android",
-                logs_or_links=None
+                logs_or_links=None,
             )
         else:
             # Categorise the failure for the user. We never leak raw exception
             # text — that's how SDK internals end up in chat. Map LLMGatewayError
             # outcomes to friendly messages; everything else is the generic case.
             from gemini_client import LLMGatewayError
+
             if isinstance(e, LLMGatewayError):
                 outcome = e.outcome
             else:
@@ -858,7 +1102,11 @@ async def _handle_bug_report(
                     "even if AI analysis is degraded."
                 ),
             }
-            return {"text": messages_by_outcome.get(outcome, messages_by_outcome["unknown_error"])}
+            return {
+                "text": messages_by_outcome.get(
+                    outcome, messages_by_outcome["unknown_error"]
+                )
+            }
 
     # ── Check if Phase 1 itself detected irrelevant/non-bug input ──
     is_rejected, rejection_reason = _is_rejection_report(initial_report)
@@ -881,10 +1129,14 @@ async def _handle_bug_report(
     if not attachments:
         try:
             logger.info("No media — creating ticket synchronously...")
-            ticket = await op_client.create_work_package(initial_report, user_api_key, project_id=target_project_id)
+            ticket = await op_client.create_work_package(
+                initial_report, user_api_key, project_id=target_project_id
+            )
             elapsed = round(time.time() - start_time, 1)
-            logger.info(f"✅ Ticket #{ticket['ticket_id']} created in {elapsed}s (text-only)")
-            
+            logger.info(
+                f"✅ Ticket #{ticket['ticket_id']} created in {elapsed}s (text-only)"
+            )
+
             return {
                 "text": (
                     f"✅ **Bug created successfully!**\n\n"
@@ -900,11 +1152,18 @@ async def _handle_bug_report(
         except Exception as e:
             logger.error(f"Ticket creation failed: {e}", exc_info=True)
             return {
-                "text": f"❌ **Error creating ticket**\n\n**Error:** {str(e)}\n\nPlease try again."
+                "text": (
+                    "❌ **Could not create the ticket.**\n\n"
+                    "There was an unexpected error contacting OpenProject. "
+                    "Please retry in a moment. If the problem persists, "
+                    "check /logs for `OP_CALL outcome=` details."
+                )
             }
 
     # ── If HAS media: fire async task for Phase 2 + ticket, return ack now ──
-    logger.info(f"Media detected ({len(attachments)} attachments) — launching async task for Phase 2")
+    logger.info(
+        f"Media detected ({len(attachments)} attachments) — launching async task for Phase 2"
+    )
     task = asyncio.create_task(
         _process_media_and_create_ticket(
             text=text_for_llm,
@@ -921,7 +1180,6 @@ async def _handle_bug_report(
     # Prevent the task from being garbage collected mid-execution
     _active_background_tasks.add(task)
     task.add_done_callback(_active_background_tasks.discard)
-
 
     return {
         "text": (
@@ -957,27 +1215,39 @@ async def _process_media_and_create_ticket(
             logger.info(f"Found {len(attachments)} attachments in the payload.")
             for idx, att in enumerate(attachments):
                 content_type = att.get("contentType", "")
-                logger.info(f"Downloading attachment {idx + 1}/{len(attachments)}: {content_type}")
+                logger.info(
+                    f"Downloading attachment {idx + 1}/{len(attachments)}: {content_type}"
+                )
                 try:
                     data = await chat_client.download_attachment(att)
                     if data:
                         if len(data) > MAX_ATTACHMENT_SIZE:
-                            logger.warning(f"Attachment {idx + 1} too large ({len(data)/1024/1024:.1f} MB), skipping")
+                            logger.warning(
+                                f"Attachment {idx + 1} too large ({len(data) / 1024 / 1024:.1f} MB), skipping"
+                            )
                             continue
-                        
+
                         # Ensure filename is unique even if contentName is missing or duplicate
                         fallback_name = f"attachment_{int(time.time())}_{idx}.{content_type.split('/')[-1] if '/' in content_type else 'bin'}"
-                        file_name = att.get("contentName") or fallback_name
-                        
+                        raw_name = att.get("contentName") or fallback_name
+                        # Sanitize filename: strip path traversal chars and control chars
+                        file_name = re.sub(r"[^\w\-\.]", "_", raw_name)[:200]
+
                         # Add an index prefix if the name already exists in the list to prevent OpenProject collisions
                         existing_names = [m["name"] for m in media_items]
                         if file_name in existing_names:
                             file_name = f"{idx}_{file_name}"
 
-                        media_items.append({"data": data, "mime_type": content_type, "name": file_name})
-                        logger.info(f"Downloaded {idx + 1}: {content_type}, {len(data)} bytes, name: {file_name}")
+                        media_items.append(
+                            {"data": data, "mime_type": content_type, "name": file_name}
+                        )
+                        logger.info(
+                            f"Downloaded {idx + 1}: {content_type}, {len(data)} bytes, name: {file_name}"
+                        )
                     else:
-                        logger.warning(f"Failed to download attachment {idx + 1}: {content_type}")
+                        logger.warning(
+                            f"Failed to download attachment {idx + 1}: {content_type}"
+                        )
                 except Exception as dl_err:
                     logger.error(f"Attachment {idx + 1} download error: {dl_err}")
         else:
@@ -987,15 +1257,23 @@ async def _process_media_and_create_ticket(
         bug_report = initial_report  # fallback
         if media_items:
             try:
-                logger.info(f"Phase 2: Enriching with {len(media_items)} media items...")
+                logger.info(
+                    f"Phase 2: Enriching with {len(media_items)} media items..."
+                )
                 enrichment_result = await asyncio.wait_for(
-                    gemini_client.enrich_with_media(text, initial_report, media_items, project_id=project_id),
-                    timeout=180.0  # 3 minutes max
+                    gemini_client.enrich_with_media(
+                        text, initial_report, media_items, project_id=project_id
+                    ),
+                    timeout=180.0,  # 3 minutes max
                 )
 
                 # Check if it was rejected during inline screening
-                if isinstance(enrichment_result, dict) and not enrichment_result.get("is_valid", True):
-                    reason = enrichment_result.get("reason", "The image does not appear to be an app screenshot.")
+                if isinstance(enrichment_result, dict) and not enrichment_result.get(
+                    "is_valid", True
+                ):
+                    reason = enrichment_result.get(
+                        "reason", "The image does not appear to be an app screenshot."
+                    )
                     logger.info(f"Content screening REJECTED in Phase 2: {reason}")
                     reject_msg = (
                         f"❌ **Media Rejected: Not a valid bug screenshot/recording**\n\n"
@@ -1009,7 +1287,9 @@ async def _process_media_and_create_ticket(
                     if chat_client and chat_client.is_available():
                         await asyncio.wait_for(
                             chat_client.send_message(
-                                space_name=space_name, text=reject_msg, thread_name=thread_name,
+                                space_name=space_name,
+                                text=reject_msg,
+                                thread_name=thread_name,
                             ),
                             timeout=10.0,
                         )
@@ -1022,7 +1302,9 @@ async def _process_media_and_create_ticket(
                 # Check if Phase 2 embedded rejection text inside the bug report fields
                 is_rejected, rejection_reason = _is_rejection_report(bug_report)
                 if is_rejected:
-                    logger.info(f"Phase 2 content-based rejection detected: {rejection_reason[:100]}")
+                    logger.info(
+                        f"Phase 2 content-based rejection detected: {rejection_reason[:100]}"
+                    )
                     reject_msg = (
                         f"❌ **Media Rejected: Not a valid bug screenshot/recording**\n\n"
                         f"**Reason:** {rejection_reason[:300]}\n\n"
@@ -1035,7 +1317,9 @@ async def _process_media_and_create_ticket(
                     if chat_client and chat_client.is_available():
                         await asyncio.wait_for(
                             chat_client.send_message(
-                                space_name=space_name, text=reject_msg, thread_name=thread_name,
+                                space_name=space_name,
+                                text=reject_msg,
+                                thread_name=thread_name,
                             ),
                             timeout=10.0,
                         )
@@ -1048,7 +1332,9 @@ async def _process_media_and_create_ticket(
         # ── Final safety check: ensure the report is genuinely a bug before creating ticket ──
         final_rejected, final_reason = _is_rejection_report(bug_report)
         if final_rejected:
-            logger.info(f"Final rejection safety check caught non-bug report: {final_reason[:100]}")
+            logger.info(
+                f"Final rejection safety check caught non-bug report: {final_reason[:100]}"
+            )
             reject_msg = (
                 f"❌ **Not a valid bug report**\n\n"
                 f"**Reason:** {final_reason[:300]}\n\n"
@@ -1061,7 +1347,9 @@ async def _process_media_and_create_ticket(
             if chat_client and chat_client.is_available():
                 await asyncio.wait_for(
                     chat_client.send_message(
-                        space_name=space_name, text=reject_msg, thread_name=thread_name,
+                        space_name=space_name,
+                        text=reject_msg,
+                        thread_name=thread_name,
                     ),
                     timeout=10.0,
                 )
@@ -1074,7 +1362,9 @@ async def _process_media_and_create_ticket(
             "Bug reported with media attachment",
         ]
         if bug_report.title in _PLACEHOLDER_TITLES:
-            logger.warning(f"Both Phase 1 and Phase 2 failed — placeholder report detected, NOT creating ticket")
+            logger.warning(
+                f"Both Phase 1 and Phase 2 failed — placeholder report detected, NOT creating ticket"
+            )
             fail_msg = (
                 "❌ **Could not process your bug report**\n\n"
                 "The AI was unable to analyze your text and media. This can happen when:\n"
@@ -1084,7 +1374,9 @@ async def _process_media_and_create_ticket(
             if chat_client and chat_client.is_available():
                 await asyncio.wait_for(
                     chat_client.send_message(
-                        space_name=space_name, text=fail_msg, thread_name=thread_name,
+                        space_name=space_name,
+                        text=fail_msg,
+                        thread_name=thread_name,
                     ),
                     timeout=10.0,
                 )
@@ -1092,7 +1384,9 @@ async def _process_media_and_create_ticket(
 
         # ── Create ticket ──
         logger.info("Creating OpenProject ticket...")
-        ticket = await op_client.create_work_package(bug_report, user_api_key, project_id=project_id)
+        ticket = await op_client.create_work_package(
+            bug_report, user_api_key, project_id=project_id
+        )
         elapsed = round(time.time() - start_time, 1)
         logger.info(f"✅ Ticket #{ticket['ticket_id']} created in {elapsed}s")
 
@@ -1104,7 +1398,7 @@ async def _process_media_and_create_ticket(
                     file_data=item["data"],
                     file_name=item["name"],
                     content_type=item["mime_type"],
-                    api_key=user_api_key
+                    api_key=user_api_key,
                 )
 
         # ── Notify user ──
@@ -1129,22 +1423,26 @@ async def _process_media_and_create_ticket(
             )
             logger.info(f"Success notification sent for ticket #{ticket['ticket_id']}")
         else:
-            logger.warning(f"Chat API unavailable — cannot notify. Ticket #{ticket['ticket_id']} was created.")
+            logger.warning(
+                f"Chat API unavailable — cannot notify. Ticket #{ticket['ticket_id']} was created."
+            )
 
     except Exception as e:
         elapsed = round(time.time() - start_time, 1)
         logger.error(f"Media processing failed after {elapsed}s: {e}", exc_info=True)
 
         error_msg = (
-            f"❌ **Error processing media for your bug report**\n\n"
-            f"**Error:** {str(e)}\n\n"
-            f"Please try again without media, or contact the administrator."
+            "❌ **Could not process your media attachment.**\n\n"
+            "There was an unexpected error during media analysis. "
+            "Please retry, or send the bug description as text only."
         )
         try:
             if chat_client and chat_client.is_available():
                 await asyncio.wait_for(
                     chat_client.send_message(
-                        space_name=space_name, text=error_msg, thread_name=thread_name,
+                        space_name=space_name,
+                        text=error_msg,
+                        thread_name=thread_name,
                     ),
                     timeout=10.0,
                 )
@@ -1152,13 +1450,10 @@ async def _process_media_and_create_ticket(
             logger.error(f"Failed to send error notification: {send_err}")
 
 
-
-
-
-
 # ─────────────────────────────────────────────
 # Deduplication
 # ─────────────────────────────────────────────
+
 
 def _is_duplicate(message_id: str) -> bool:
     """Check and record a message ID for deduplication."""
@@ -1190,6 +1485,7 @@ def _is_duplicate(message_id: str) -> bool:
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(
         "main:app",
         host="0.0.0.0",

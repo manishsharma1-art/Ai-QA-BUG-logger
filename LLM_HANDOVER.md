@@ -2,7 +2,7 @@
 
 > **Purpose:** This document is written for any AI/LLM agent or developer that takes over development or maintenance of this codebase. Read this FIRST before making any changes.
 >
-> _Last updated: 2026-06-04 — after 11.8k corpus RAG retrieval was deployed and GCP was cleaned up._
+> _Last updated: 2026-06-05 — security hardening, prompt improvements, and TestLink knowledge base deployed._
 
 ---
 
@@ -75,8 +75,10 @@ PHASE 1 — Inline, synchronous (≤25s)
   ├─ optional pick_bucket() if provenance == "default"
   ├─ Input validation (link-only, min-text, media-only)
   ├─ analyze_text_brief(text_for_llm)            ← LLM call #1
-  │     SYSTEM_PROMPT = base rules + 50 few-shot INPUT/OUTPUT examples
-  │     max_tokens=1000, client_timeout=20s, asyncio.wait_for=22s
+  │     SYSTEM_PROMPT = base rules
+  │                   + TestLink best-match test case (Layer A, if TESTLINK_RAG_ENABLED)
+  │                   + RAG-selected few-shot examples from bug corpus (Layer B)
+  │     max_tokens=512, client_timeout=20s, asyncio.wait_for=22s
   │     On gateway error: raises LLMGatewayError(outcome=auth/rate/server/network/unknown)
   ├─ Rejection detection on Phase 1 result
   └─ Returns HTTP response within 30s
@@ -88,7 +90,8 @@ PHASE 2 — Async background task (15-50s)
   ├─ OpenCV frame extraction (1 fps, 480px, max 20 frames)
   ├─ enrich_with_media(...)                       ← LLM call #2
   │     PHASE2_PROMPT_TEMPLATE with full 11 mandatory fields
-  │     max_tokens=6000, client_timeout=45s, asyncio.wait_for=50s
+  │     environment/bug_type/priority injected from Phase 1 values (not hardcoded defaults)
+  │     max_tokens=1024, client_timeout=45s, asyncio.wait_for=50s
   │     Three fall-back paths to Phase 1 result:
   │       1. Phase2TruncatedError (response truncated)
   │       2. asyncio.TimeoutError → PHASE2_SLOW log
@@ -101,12 +104,48 @@ PHASE 2 — Async background task (15-50s)
 
 ### C. Few-shot prompt augmentation (audit-driven)
 
-`gemini_client._load_few_shot_block(max_examples=50)` runs once at module import. It loads the top 50 entries from `assets/training_examples.json` (606 curated real OpenProject tickets), renders them as INPUT→OUTPUT pairs, appends them to `SYSTEM_PROMPT`. Both Phase 1 and Phase 2 see them.
+`gemini_client._load_few_shot_block(max_examples=10)` runs once at module import and serves as the **static fallback** when RAG is disabled or fails. The primary path uses `bug_retriever.py` to dynamically select the top-K most semantically similar tickets from the 11,862-entry corpus at retrieval time.
 
-- 50 examples = ~5,700 chars of prompt overhead = ~1,500 tokens
-- Empirically measured Phase 1 latency at 50 examples: ~4.4s avg (was 3.85s with 5 examples)
-- 100 examples works but adds little value
-- 150+ examples hits a gateway timeout cliff — DO NOT BUMP
+**Static fallback** (when RAG is disabled or fails): the top 10 entries from `assets/training_examples.json` are rendered as INPUT→OUTPUT pairs and appended to `SYSTEM_PROMPT`.
+
+- 10 examples ≈ ~2,500 tokens of prompt overhead (was ~12K at 50 examples — ~1,800ms latency saving on cold start)
+- Empirically measured Phase 1 median latency with static fallback: ~2.6s avg
+- 100+ examples risk a gateway timeout cliff — DO NOT bump static fallback past 50
+
+**Training data quality filters (added 2026-06-05):** entries with HTML artifacts, unfilled template placeholders, or missing steps are skipped at index time.
+
+Both Phase 1 and Phase 2 see the same prompt composition (Layer A + Layer B + base rules).
+
+### D. TestLink Knowledge Base (2026-06-05)
+
+`testlink_retriever.py` provides a second RAG layer ("Layer A") that injects domain-specific flow knowledge — exact screen names, CTA names, and navigation flows — that the LLM cannot learn from bug ticket text alone.
+
+```
+Prompt construction (per request):
+  ┌─ Layer A: TestLink best-match test case        (prepended first)
+  │     • testlink_retriever.py embeds the incoming brief
+  │     • Cosine similarity against 710 TC embeddings
+  │     • Injects the single best match if similarity ≥ 0.30
+  │     • Skipped entirely if TESTLINK_RAG_ENABLED=false or no match
+  │
+  └─ Layer B: Bug-corpus few-shot examples         (follows Layer A)
+        • bug_retriever.py — top-K from 11,862 tickets
+        • Falls back to static 10-example block on error
+```
+
+| Detail | Value |
+|---|---|
+| **Embedder** | `sentence-transformers/all-MiniLM-L6-v2` |
+| **Corpus** | 710 sanity test cases across 80 modules — `assets/testlink_cases.json` |
+| **Source** | TestLink suite ID 26691 at `https://testlink.intermesh.net` |
+| **Project prefix** | AND |
+| **Similarity threshold** | Cosine ≥ 0.30; no injection below threshold |
+| **GCS cache** | `gs://qa-bugbot-data/testlink_embeddings.npz` |
+| **Kill-switch env var** | `TESTLINK_RAG_ENABLED=false` (leave unset or `true` to enable) |
+| **Refresh** | `python scripts/fetch_testlink.py` (re-fetches from TestLink API) |
+| **API key env var** | `TESTLINK_API_KEY` — never commit to version control |
+
+**Example value:** the "Purchase Buy Lead" flow now includes the Subscription Plan intermediate screen sourced from TC AND-4714, which the LLM would otherwise omit or invent.
 
 ---
 
@@ -114,7 +153,7 @@ PHASE 2 — Async background task (15-50s)
 
 | File | Purpose | Key entry points |
 |---|---|---|
-| `main.py` | FastAPI app, lifespan, webhook handler, `_handle_bug_report` orchestration | `webhook()`, `_handle_bug_report()`, `_process_media_and_create_ticket()` |
+| `main.py` | FastAPI app, lifespan, webhook handler, `_handle_bug_report` orchestration | `webhook()`, `_handle_bug_report()`, `_process_media_and_create_ticket()`, `_verify_webhook_auth()` |
 | `gemini_client.py` | LLM integration, prompts, frame extraction, smoke test, bucket picker | `analyze_text_brief()`, `enrich_with_media()`, `smoke_test()`, `pick_bucket()`, `_clean_json_response()`, `_log_llm_call()` |
 | `bucket_router.py` | Deterministic project routing, no LLM | `extract_bucket_from_message()`, `extract_bucket_with_provenance()`, `_extract_bucket_from_freetext()`, `_resolve_tag()` |
 | `models.py` | Pydantic models, validators | `ExtractedBugReport`, `validate_priority` (word-boundary regex), `validate_platform` (30-alias map) |
@@ -123,7 +162,11 @@ PHASE 2 — Async background task (15-50s)
 | `database.py` | SQLite + GCS sync with fail-closed safeguard | `get_user_by_chat_id()`, `create_or_update_user()`, `_download_db_from_gcs()`, `_upload_db_to_gcs()`, `_safe_upload_db_to_gcs()`, `get_last_gcs_sync()` |
 | `env_validator.py` | Startup env-var corruption canary | `validate_env_vars()` (5 checks), `read_build_marker()` |
 | `config.py` | Settings, `OP_PROJECTS` (34 projects), bug-type / priority / environment ID mappings | `get_settings()` |
-| `assets/training_examples.json` | 11,862 curated real tickets — source for RAG retrieval | (read by `bug_retriever.index`) |
+| `bug_retriever.py` | Bug-corpus RAG retriever (Layer B) | `index()`, `retrieve()`, `format_for_prompt()` |
+| `testlink_retriever.py` | TestLink sanity test case RAG retriever (Layer A) | `init_testlink_retriever()`, `get_testlink_retriever()`, `TestLinkRetriever.retrieve()`, `TestLinkRetriever.format_for_prompt()` |
+| `scripts/fetch_testlink.py` | One-time/periodic TestLink data pipeline | Run with `python scripts/fetch_testlink.py` |
+| `assets/training_examples.json` | 11,862 curated real tickets — source for bug-corpus RAG (Layer B) | (read by `bug_retriever.index`) |
+| `assets/testlink_cases.json` | 710 TestLink sanity test cases (clean JSON, no HTML) | Source for TestLink retriever (Layer A) |
 
 ---
 
@@ -142,7 +185,7 @@ The 34 currently-supported projects are listed in `config.py`. Three projects fl
 ## 5. LLM System Prompt
 
 **File:** `gemini_client.py` → `SYSTEM_PROMPT`
-**Size:** ~14,700 tokens total = ~3,100 tokens of rules + ~11,600 tokens of 50 few-shot INPUT/OUTPUT examples
+**Size (static fallback):** ~5,600 tokens total = ~3,100 tokens of rules + ~2,500 tokens of 10 few-shot INPUT/OUTPUT examples. With RAG active, few-shot token count varies by retrieved content.
 **Purpose:** Bug analysis ONLY. NOT bucket routing (that's `bucket_router.py`).
 
 **What the LLM returns:**
@@ -166,7 +209,17 @@ The 34 currently-supported projects are listed in `config.py`. Three projects fl
 - `platform` — has a Pydantic default of `Android`; the actual project routing is independent
 - `category` — disabled to prevent 422 errors
 
-**Priority calibration (in prompt + reinforced by 50 examples):**
+**Schema constraints enforced in the prompt (added 2026-06-05):**
+- `actual_behavior`: 3-sentence format — (1) what the user did, (2) what actually happened, (3) any error text shown. Prevents copy-paste of the title as `actual_behavior`.
+- `expected_behavior`: must describe the correct outcome; must NOT be a simple negation of `actual_behavior` (e.g. "should not crash" is rejected).
+
+**Prompt rule exceptions (added 2026-06-05):**
+- Rule 1 exception: login/OTP/onboarding bugs are NOT forced to use "Login as seller" as Step 1 — the bug IS the login step.
+- Rule 2 exception: bugs entered via notification tap or deep link skip the manual navigation step.
+
+**Closed-vocabulary standard flows (added 2026-06-05):** The prompt defines fixed, named flows (Purchase Buy Lead, BMC message, Add product) with precise step sequences. Replaces the previous open-ended "use your domain knowledge" instruction.
+
+**Priority calibration (in prompt + reinforced by examples):**
 - 95% should be Medium
 - High ONLY for crashes, complete login failure, payment broken, data loss
 - Low ONLY for pure cosmetic issues
@@ -175,7 +228,7 @@ The 34 currently-supported projects are listed in `config.py`. Three projects fl
 
 ## 6. Observability
 
-Every external call emits a structured log line. Greppable in Cloud Run logs OR via the bot's own `/logs` endpoint.
+Every external call emits a structured log line. Greppable in Cloud Run logs OR via the bot's own `/logs` endpoint (token-gated — see §Security).
 
 | Log marker | Source | Outcomes |
 |---|---|---|
@@ -191,7 +244,9 @@ Every external call emits a structured log line. Greppable in Cloud Run logs OR 
 | `PHASE2_SLOW outcome=timeout duration_ms=50000 frames=N` | `gemini_client.enrich_with_media` | When `asyncio.wait_for` deadline trips. |
 | `PRIORITY_AMBIGUOUS:` | `models.validate_priority` | When a string matches both HIGH and LOW whitelists. |
 
-`/health` exposes the most recent `last_gcs_sync` snapshot and the smoke-test outcome (`gemini` field).
+**Health endpoints:**
+- `GET /health` — public, returns only `{status, database, gemini, timestamp}`.
+- `GET /health/details` — requires `X-Internal-Token` or `Authorization: Bearer <token>`, returns full snapshot including `last_gcs_sync`, RAG state, build marker, and all subsystem details.
 
 ---
 
@@ -216,7 +271,7 @@ Every external call emits a structured log line. Greppable in Cloud Run logs OR 
 ## 8. OpenProject Integration
 
 **API:** OpenProject v3 REST API at `https://project.intermesh.net/api/v3/`
-**Auth:** Per-user API keys via Basic auth (`apikey:<key>`)
+**Auth:** Per-user API keys via Basic auth (`apikey:<key>`). Keys are encrypted at rest using Fernet/AES-128 when `DB_ENCRYPTION_KEY` is set (see §Security).
 **Project routing:** `create_work_package(bug_report, api_key, project_id=N)` — `project_id` comes from `bucket_router`, not from `bug_report.platform`.
 
 ### Key fields
@@ -255,10 +310,20 @@ gcloud run deploy qa-bugbot \
   --update-env-vars "BUILD_MARKER=<sha>,DEFAULT_OPENPROJECT_API_KEY=<key>,DEMO_SPACE_ID=<id>,RAG_ENABLED=true,RAG_TOPK=10,RAG_CACHE_GCS=true"
 ```
 
+**New optional env vars (2026-06-05) — add to `--update-env-vars` as needed:**
+
+| Env var | Purpose | Leave unset to… |
+|---|---|---|
+| `WEBHOOK_AUDIENCE` | Enable Google Chat OIDC JWT verification on inbound webhooks | Disable verification (dev/local) |
+| `INTERNAL_API_TOKEN` | Gate `/logs` and `/health/details` endpoints | Allow unauthenticated access (not recommended in prod) |
+| `DB_ENCRYPTION_KEY` | Fernet key for encrypting OpenProject API keys at rest | Store keys in plaintext |
+| `TESTLINK_API_KEY` | Authenticate to TestLink API for corpus refresh | Skip TestLink fetch |
+| `TESTLINK_RAG_ENABLED` | Set to `false` to disable Layer A entirely | Enabled by default |
+
 ### Critical deployment nuances
 
 - `--no-cpu-throttling`: **Mandatory.** Cloud Run scales CPU to zero immediately after an HTTP response. Phase 2 uses `asyncio.create_task` to process media after the webhook ack returns, so without this flag the background task dies silently.
-- `--memory 4Gi`: Required to load and process the 11.8k entry RAG corpus embeddings on startup without throwing silent OOM errors, and for OpenCV video processing.
+- `--memory 4Gi`: Required to load the 11,862-entry bug-corpus embeddings and 710 TestLink TC embeddings on startup without silent OOM errors, and for OpenCV video processing.
 - `--update-env-vars` value MUST be **comma-separated**, not space-separated. RC2 was caused by the space-separator concatenating `DEMO_SPACE_ID=...` into the API key value.
 - `service-account.json` MUST be in the source upload. It's `.gitignored` (so it never enters version control) but ALLOWED through `.gcloudignore` and `.dockerignore`. The v1 deploy attempt failed because this file was missing.
 - After the build completes, Cloud Run creates a new revision but may NOT auto-flip traffic if traffic was previously pinned. Force the flip:
@@ -285,15 +350,96 @@ Installed at `.git/hooks/pre-commit` from `scripts/hooks/pre-commit`. Scans stag
 
 ---
 
-## 10. Recent Changes Worth Knowing About (2026-05-25 → 2026-05-30)
+## Security
+
+Added 2026-06-05. All security features degrade gracefully — leaving env vars unset simply disables the corresponding protection, which is acceptable in local dev.
+
+### Webhook authentication
+
+`_verify_webhook_auth()` in `main.py` validates the Google Chat OIDC JWT on every inbound webhook request.
+
+- Set `WEBHOOK_AUDIENCE=https://qa-bugbot-542857204182.asia-south1.run.app` to enable in production.
+- Leave `WEBHOOK_AUDIENCE` unset for local dev/testing — verification is skipped entirely.
+
+### Protected endpoints
+
+| Endpoint | Auth required | Returns |
+|---|---|---|
+| `GET /health` | None (public) | `{status, database, gemini, timestamp}` only |
+| `GET /health/details` | `X-Internal-Token: <token>` or `Authorization: Bearer <token>` | Full system snapshot |
+| `GET /logs` | Same as `/health/details` | Structured log tail |
+
+Set `INTERNAL_API_TOKEN` to enable token gating. Leave unset to allow unauthenticated access (not recommended in production).
+
+### Rate limiting
+
+1 bug report per 5 seconds per sender (Google Chat user ID). Excess requests receive a friendly rejection message and are not processed. Configurable via the `RATE_LIMIT_WINDOW_SECONDS` constant in `main.py`.
+
+### OpenProject API key encryption
+
+When `DB_ENCRYPTION_KEY` is set (Fernet key), OpenProject API keys are encrypted at rest in SQLite using Fernet/AES-128. Generate a key with:
+
+```python
+from cryptography.fernet import Fernet
+print(Fernet.generate_key().decode())
+```
+
+Store the key value in `DB_ENCRYPTION_KEY` — never commit it.
+
+### Additional hardening (2026-06-05)
+
+- 5,000-character text length cap on inbound messages
+- Control-character sanitization on all user input before processing
+- Raw `str(e)` exception text removed from all user-facing error messages
+- CORS locked to `https://chat.googleapis.com`
+- Attachment filenames sanitized before use in file operations
+- `asyncio.get_event_loop()` replaced with `asyncio.get_running_loop()` throughout
+
+---
+
+## 10. Recent Changes Worth Knowing About (2026-05-25 → 2026-06-05)
+
+### Security hardening (2026-06-05)
+
+- Webhook JWT verification for Google Chat OIDC (`_verify_webhook_auth()`, controlled by `WEBHOOK_AUDIENCE`)
+- Per-user rate limiting: 1 bug report per 5-second window per sender
+- 5,000-character text length cap on inbound messages
+- Control-character sanitization on user input
+- OpenProject API keys encrypted at rest using Fernet/AES-128 (controlled by `DB_ENCRYPTION_KEY`)
+- `/logs` and `/health/details` token-gated (controlled by `INTERNAL_API_TOKEN`)
+- Raw `str(e)` removed from all user-facing error messages
+- CORS locked to `https://chat.googleapis.com`
+- Attachment filenames sanitized
+- `asyncio.get_event_loop()` → `asyncio.get_running_loop()` throughout
+
+### Prompt improvements (2026-06-05)
+
+- `actual_behavior` schema: 3-sentence format (what user did + outcome + error text) — prevents copy-paste of title
+- `expected_behavior` schema: must describe correct outcome, not a simple negation
+- Rule 1 exception: login/OTP/onboarding bugs no longer forced to "Login as seller" as Step 1
+- Rule 2 exception: notification/deep-link entry points skip manual navigation step
+- Closed-vocabulary standard flows (Purchase Buy Lead, BMC message, Add product) — replaces open-ended domain knowledge invocation
+- Training data quality filters at index time: skip HTML-artifact entries, unfilled template entries, entries without steps
+- Static fallback: 50 → 10 examples (~12K tokens → ~2.5K tokens, ~1,800ms latency saving on cold start)
+- `max_tokens` Phase 1: 2000 → 512
+- `max_tokens` Phase 2: 6000 → 1024
+- Phase 2 output template: `environment`/`bug_type`/`priority` injected from Phase 1 values (previously hardcoded as `"STAGE"`/`"Functional/Logical"`/`"Medium"`)
+
+### TestLink knowledge base (2026-06-05)
+
+- 710 sanity test cases fetched and indexed from TestLink suite 26691 (`https://testlink.intermesh.net`)
+- Semantic retriever (`testlink_retriever.py`) prepends the single best-matching test case to the LLM prompt as "Layer A" (before bug-corpus few-shot examples)
+- Gives the LLM exact screen names, CTA names, and intermediate screens it cannot infer from bug tickets alone
+- Example: "Purchase Buy Lead" flow now includes the Subscription Plan screen sourced from TC AND-4714
+- Kill-switch: `TESTLINK_RAG_ENABLED=false`; refresh corpus: `python scripts/fetch_testlink.py`
 
 ### RAG-Augmented Few-Shot Retrieval (2026-06-02)
 
-- **Architecture:** Replaced the static 50-example few-shot prompt with a dynamic RAG retriever (`bug_retriever.py`) that uses `sentence-transformers/all-MiniLM-L6-v2` to fetch the top 5 most semantically similar tickets from the corpus.
+- **Architecture:** Replaced the static 50-example few-shot prompt with a dynamic RAG retriever (`bug_retriever.py`) that uses `sentence-transformers/all-MiniLM-L6-v2` to fetch the top-K most semantically similar tickets from the corpus.
 - **Cache Mechanism:** Embeddings are cached to `gs://qa-bugbot-data/embeddings.npz` and loaded on cold start to prevent ~15s recompute delays, verified via content hash.
 - **Fallbacks:** 4 layers of fallback ensure the webhook never fails due to RAG (stale cache → recompute, download fail → recompute, embed error → static block, import error → static block).
 - **Env Vars:** Controlled by `RAG_ENABLED` (master kill switch), `RAG_TOPK`, and `RAG_CACHE_GCS`.
-- **Latency:** Decreased Phase 1 median latency by >1500 ms compared to the old static 50-example prompt.
+- **Latency:** Decreased Phase 1 median latency by >1,500ms compared to the old static 50-example prompt.
 - **`/health`:** Extended with a `.rag` sub-object detailing corpus size, model, cache source, and outcome.
 
 ### Production reliability deploy (May 2026)
@@ -312,7 +458,7 @@ Installed at `.git/hooks/pre-commit` from `scripts/hooks/pre-commit`. Scans stag
 ### Earlier reliability work
 
 - Bucket routing moved entirely to Python (`bucket_router.py`) — LLM no longer chooses the project for the common case.
-- LLM prompt shrunk from 8000 to ~1500 base tokens (now ~3,100 base + 11,600 few-shot = ~14,700 total).
+- LLM prompt shrunk from 8,000 to ~1,500 base tokens (now ~3,100 base + dynamic few-shot = varies).
 - Two-phase pipeline introduced (Phase 1 inline + Phase 2 async).
 - `--no-cpu-throttling` made mandatory after FastAPI BackgroundTasks were silently killed by Cloud Run.
 - `_active_background_tasks` set added to prevent Python GC from killing in-flight Phase 2 tasks.
@@ -323,7 +469,7 @@ Installed at `.git/hooks/pre-commit` from `scripts/hooks/pre-commit`. Scans stag
 
 1. **Never use `--set-env-vars` with space-separated values.** RC2 root cause. Always comma-separated, or use `--env-vars-file env.yaml`.
 2. **Never deploy without `--no-cpu-throttling`.** Phase 2 will silently die.
-3. **Never deploy without `--memory 4Gi`.** The `sentence-transformers` RAG embedder will silently OOM during background initialization of the 11.8k corpus if given less memory.
+3. **Never deploy without `--memory 4Gi`.** The `sentence-transformers` RAG embedder will silently OOM during background initialization of the 11,862-entry corpus and 710 TestLink TC embeddings if given less memory.
 4. **Never re-add `service-account.json` to `.gcloudignore`/`.dockerignore`.** It's gitignored; the runtime needs it in the image.
 5. **Never modify `requirements.txt` to add new runtime deps without testing.** Use `requirements-dev.txt` for dev deps.
 6. **Never reduce video frame extraction below 20 frames per video.**
@@ -335,6 +481,10 @@ Installed at `.git/hooks/pre-commit` from `scripts/hooks/pre-commit`. Scans stag
 12. **Never bump few-shot examples past 100** without re-measuring latency. The IndiaMART gateway has a timeout cliff between 100 and 150.
 13. **Never commit a real token to `.env.example`.** Pre-commit hook will catch you (tested).
 14. **Never deploy from a dirty working tree.** `git status --porcelain` must be empty.
+15. **Never reduce `max_tokens` Phase 1 below 400.** Current maximum observed output is ~313 tokens; 512 is the safe floor.
+16. **Never reduce `max_tokens` Phase 2 below 800.** Full 11-field structured output requires headroom.
+17. **Never remove the `TESTLINK_RAG_ENABLED` env var.** It is the kill-switch if TestLink test cases cause wrong steps to be generated.
+18. **Never commit the TestLink API key to version control.** Store only in env vars (`TESTLINK_API_KEY`).
 
 ---
 
@@ -343,9 +493,10 @@ Installed at `.git/hooks/pre-commit` from `scripts/hooks/pre-commit`. Scans stag
 If you are an LLM reading this:
 
 1. Read `.kiro/specs/production-reliability-fixes/HANDOVER.md` next — that's the spec-level "current truth" doc with detailed live-state evidence.
-2. Verify before trusting: `curl https://qa-bugbot-542857204182.asia-south1.run.app/health` and check `/logs`.
+2. Verify before trusting: `curl https://qa-bugbot-542857204182.asia-south1.run.app/health` for public status. For full system state (RAG, GCS sync, build marker), use `GET /health/details` with `Authorization: Bearer <INTERNAL_API_TOKEN>`.
 3. Trust source files over markdown if anything seems inconsistent.
-4. The current pipeline is well-instrumented (`LLM_CALL`, `OP_CALL`, `GCS_SYNC`, `ENV_VALIDATION` log markers). Use them when debugging.
-5. Tests are the contract. 190 unit tests + 9 synthetic scenarios pin the current behavior.
+4. The current pipeline is well-instrumented (`LLM_CALL`, `OP_CALL`, `GCS_SYNC`, `ENV_VALIDATION`, `RAG_INDEX`, `RAG_RETRIEVE` log markers). Use them when debugging. Full log tail available at `GET /logs` (token-gated).
+5. Tests are the contract. **236 unit tests** + 10 synthetic scenarios pin the current behavior. Run with `pytest tests/unit -q`.
 6. The `service-account.json` file must exist locally at the repo root before any `--source .` deploy.
 7. To test locally: use `ngrok` to tunnel webhooks to a local `uvicorn` instance.
+8. To refresh the TestLink knowledge base: `python scripts/fetch_testlink.py` (requires `TESTLINK_API_KEY` in env). This re-fetches all 710 TCs from suite 26691 and regenerates `assets/testlink_cases.json`. Re-deploy or restart to pick up the new embeddings.

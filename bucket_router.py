@@ -11,10 +11,10 @@ Flow:
 6. Default: Android
 """
 
-import re
 import logging
+import re
 from difflib import get_close_matches
-from typing import Tuple, Optional
+from typing import Optional, Tuple
 
 from config import OP_PROJECTS
 
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # prevents free-floating brackets like `[step 3]` or `[2024-05-12]` from being
 # treated as bucket tags.
 BUCKET_TAG_RE = re.compile(
-    r'^\s*\[([A-Za-z][A-Za-z0-9 &/\-]{1,40})\]\s*',
+    r"^\s*\[([A-Za-z][A-Za-z0-9 &/\-]{1,40})\]\s*",
     re.UNICODE,
 )
 
@@ -171,19 +171,79 @@ PROJECT_ALIASES = {
 # they get score=1 in the free-text scoring pass instead of the default score=5.
 # See _extract_bucket_from_freetext (Theme 4.5).
 CROSS_KEYWORD_SINGLE_WORDS = {
-    "login", "home", "homepage", "search", "page", "screen",
-    "app", "android", "ios", "user", "buyer", "seller",
+    "login",
+    "home",
+    "homepage",
+    "search",
+    "page",
+    "screen",
+    "app",
+    "android",
+    "ios",
+    "user",
+    "buyer",
+    "seller",
 }
 
 # Android device keywords
 ANDROID_DEVICES = [
-    "samsung", "iqoo", "realme", "motorola", "moto", "poco",
-    "redmi", "xiaomi", "oneplus", "vivo", "oppo", "nothing",
-    "google pixel", "pixel", "nokia", "tecno", "infinix", "mi ",
+    "samsung",
+    "iqoo",
+    "realme",
+    "motorola",
+    "moto",
+    "poco",
+    "redmi",
+    "xiaomi",
+    "oneplus",
+    "vivo",
+    "oppo",
+    "nothing",
+    "google pixel",
+    "pixel",
+    "nokia",
+    "tecno",
+    "infinix",
+    "mi ",
+    "honor",
+    "lava",
+    "micromax",
+    "asus",
+    "lenovo",
 ]
 
 # iOS device keywords
 IOS_DEVICES = ["iphone", "ipad", "apple"]
+
+# Regex for explicit OS version: "Android 14", "Android 14.0", "iOS 17", "ios 17.1"
+# Also catches "Android14" (no space).
+# This is the strongest possible device signal — tester is explicitly stating the platform.
+_OS_VERSION_RE = re.compile(
+    r"\b(android|ios)\s*\d+(?:\.\d+)?\b",
+    re.IGNORECASE,
+)
+
+
+def _has_strong_device_signal(text: str) -> bool:
+    """
+    Returns True when the brief contains an explicit OS version ("Android 14",
+    "iOS 17") or a recognised device model name.
+
+    Used to short-circuit free-text project alias matching: when a tester
+    writes "Seller dashboard not loading. Samsung S23, Android 14" they are
+    describing the SCREEN they are on, NOT the project the ticket belongs to.
+    The device/OS signal overrides any project-name match.
+    """
+    if _OS_VERSION_RE.search(text):
+        return True
+    text_lower = text.lower()
+    for device in IOS_DEVICES:
+        if device in text_lower:
+            return True
+    for device in ANDROID_DEVICES:
+        if device in text_lower:
+            return True
+    return False
 
 
 def extract_bucket_from_message(text: str) -> Tuple[Optional[int], str]:
@@ -235,20 +295,41 @@ def extract_bucket_with_provenance(text: str) -> Tuple[Optional[int], str, str]:
             logger.info(f"Bucket routing: [{tag}] → project {project_id}")
             return project_id, text, "tag"
         else:
-            logger.warning(f"Bucket routing: [{tag}] — no match found, trying free-text")
+            logger.warning(
+                f"Bucket routing: [{tag}] — no match found, trying free-text"
+            )
 
-    # Layer 2: Free-text bucket extraction (Theme 4.5 + audit prose patterns)
+    # Layer 2 — Strong device signal (OS version or device model).
+    # Runs BEFORE free-text alias matching intentionally:
+    # when a tester writes "Seller dashboard crash. Samsung S23, Android 14"
+    # they describe the SCREEN they were on, not the project.
+    # Device/OS info is an explicit platform declaration and must win.
+    if _has_strong_device_signal(text):
+        project_id, device_matched = _detect_device_platform_with_provenance(text)
+        if device_matched:
+            logger.info(
+                "Bucket routing: strong device signal \u2192 project %d (device-first)",
+                project_id,
+            )
+            return project_id, text, "device"
+
+    # Layer 3 — Free-text project alias scoring.
+    # Only reached when no explicit device/OS info is present in the brief.
+    # Safely matches project names ("Desktop Search", "Seller BuyLeads", etc.)
+    # without being confused by screen names that share project names.
     project_id = _extract_bucket_from_freetext(text)
     if project_id:
-        logger.info(f"Bucket routing: free-text match → project {project_id}")
+        logger.info(f"Bucket routing: free-text match \u2192 project {project_id}")
         return project_id, text, "freetext"
 
-    # Layer 3: Device/OS detection — also report whether a real device matched
+    # Layer 4 — Device model detection (catches device names without OS version).
     project_id, device_matched = _detect_device_platform_with_provenance(text)
     if device_matched:
-        logger.info(f"Bucket routing: device-detection → project {project_id}")
+        logger.info(f"Bucket routing: device-detection \u2192 project {project_id}")
         return project_id, text, "device"
-    logger.info(f"Bucket routing: no signal, falling back to default → project {project_id}")
+    logger.info(
+        f"Bucket routing: no signal, falling back to default \u2192 project {project_id}"
+    )
     return project_id, text, "default"
 
 
@@ -276,7 +357,7 @@ def _detect_device_platform_with_provenance(text: str) -> Tuple[int, bool]:
 
 # Regex for "bucket - X", "bucket: X", "bucket X" shorthand
 _BUCKET_SHORTHAND_RE = re.compile(
-    r'\bbucket\s*[-:]?\s*([A-Za-z][A-Za-z0-9 &/\-]{1,40})',
+    r"\bbucket\s*[-:]?\s*([A-Za-z][A-Za-z0-9 &/\-]{1,40})",
     re.IGNORECASE,
 )
 
@@ -286,15 +367,15 @@ _BUCKET_SHORTHAND_RE = re.compile(
 #   "→ should create in <name>", "→ raise in <name>"
 # Pattern allows a leading arrow / hyphen / colon / dash for the "→" form.
 _BUCKET_PROSE_RE = re.compile(
-    r'(?:->|→|:|\s)\s*'
-    r'(?:should\s+(?:be\s+)?(?:raise(?:d)?|open(?:ed)?|create(?:d)?|file(?:d)?)'
-    r'|raise(?:d)?|open(?:ed)?|create(?:d)?|file(?:d)?)'
-    r'(?:\s+(?:bug|ticket|issue))?'
-    r'\s+in\s+'
-    r'(?:the\s+)?'
-    r'([A-Za-z][A-Za-z0-9 &/\-,.]{1,60}?)'
-    r'(?:\s+(?:project|bucket))?'
-    r'(?:\s*[\.\n,;]|$)',
+    r"(?:->|→|:|\s)\s*"
+    r"(?:should\s+(?:be\s+)?(?:raise(?:d)?|open(?:ed)?|create(?:d)?|file(?:d)?)"
+    r"|raise(?:d)?|open(?:ed)?|create(?:d)?|file(?:d)?)"
+    r"(?:\s+(?:bug|ticket|issue))?"
+    r"\s+in\s+"
+    r"(?:the\s+)?"
+    r"([A-Za-z][A-Za-z0-9 &/\-,.]{1,60}?)"
+    r"(?:\s+(?:project|bucket))?"
+    r"(?:\s*[\.\n,;]|$)",
     re.IGNORECASE,
 )
 
@@ -329,7 +410,7 @@ def _extract_bucket_from_freetext(text: str) -> Optional[int]:
         candidate = prose_match.group(1).strip().rstrip(".,;")
         # Strip a trailing common noise word that the regex's lazy match might
         # leave behind (e.g. "Photo Search im bucket" → "Photo Search im").
-        candidate = re.sub(r'\s+(project|bucket)$', '', candidate)
+        candidate = re.sub(r"\s+(project|bucket)$", "", candidate)
         project_id = _resolve_tag(candidate)
         if project_id:
             return project_id  # prose match wins (very high confidence signal)
@@ -341,7 +422,7 @@ def _extract_bucket_from_freetext(text: str) -> Optional[int]:
     for canonical_name, project_id in OP_PROJECTS.items():
         name_lower = canonical_name.lower()
         # Check for whole-word phrase match using word boundaries
-        pattern = r'\b' + re.escape(name_lower) + r'\b'
+        pattern = r"\b" + re.escape(name_lower) + r"\b"
         if re.search(pattern, text_lower):
             scores[project_id] = scores.get(project_id, 0) + 10
 
@@ -354,7 +435,7 @@ def _extract_bucket_from_freetext(text: str) -> Optional[int]:
 
         if len(alias_words) >= 2:
             # Multi-word alias — weight 8
-            pattern = r'\b' + re.escape(alias) + r'\b'
+            pattern = r"\b" + re.escape(alias) + r"\b"
             if re.search(pattern, text_lower):
                 scores[project_id] = scores.get(project_id, 0) + 8
         else:
@@ -363,7 +444,7 @@ def _extract_bucket_from_freetext(text: str) -> Optional[int]:
                 weight = 1  # generic, ambiguous word
             else:
                 weight = 5  # specific single-word alias
-            pattern = r'\b' + re.escape(alias) + r'\b'
+            pattern = r"\b" + re.escape(alias) + r"\b"
             if re.search(pattern, text_lower):
                 scores[project_id] = scores.get(project_id, 0) + weight
 
@@ -404,8 +485,10 @@ def _resolve_tag(tag: str) -> Optional[int]:
 
     # Step 4: Alias-substring match (alias must appear within tag, alias must be ≥3 chars)
     # Sort by length descending so longer aliases match first (fixes Property 3 for typos like 'adesktop lms' vs 'desktop lms' vs 'lms')
-    for alias, proj_name in sorted(PROJECT_ALIASES.items(), key=lambda x: len(x[0]), reverse=True):
-        if len(alias) >= 3 and re.search(r'\b' + re.escape(alias) + r'\b', tag_lower):
+    for alias, proj_name in sorted(
+        PROJECT_ALIASES.items(), key=lambda x: len(x[0]), reverse=True
+    ):
+        if len(alias) >= 3 and re.search(r"\b" + re.escape(alias) + r"\b", tag_lower):
             if proj_name in OP_PROJECTS:
                 return OP_PROJECTS[proj_name]
 
@@ -417,9 +500,11 @@ def _resolve_tag(tag: str) -> Optional[int]:
     # return None rather than fuzzy-matching to spurious aliases.
     if len(tag_lower) < 4:
         return None
-    candidates = [n.lower() for n in
-                  list(OP_PROJECTS.keys()) + list(PROJECT_ALIASES.keys())
-                  if len(n) >= 4]
+    candidates = [
+        n.lower()
+        for n in list(OP_PROJECTS.keys()) + list(PROJECT_ALIASES.keys())
+        if len(n) >= 4
+    ]
     matches = get_close_matches(tag_lower, candidates, n=1, cutoff=0.78)
     if matches:
         matched_lower = matches[0]
@@ -429,7 +514,9 @@ def _resolve_tag(tag: str) -> Optional[int]:
                 return OP_PROJECTS[key]
         for alias, proj_name in PROJECT_ALIASES.items():
             if alias.lower() == matched_lower and proj_name in OP_PROJECTS:
-                logger.info(f"Fuzzy matched [{tag}] → {proj_name} (via alias '{alias}')")
+                logger.info(
+                    f"Fuzzy matched [{tag}] → {proj_name} (via alias '{alias}')"
+                )
                 return OP_PROJECTS[proj_name]
 
     return None
@@ -438,22 +525,22 @@ def _resolve_tag(tag: str) -> Optional[int]:
 def _detect_device_platform(text: str) -> int:
     """Detect Android/iOS from device names in text. Default: Android."""
     text_lower = text.lower()
-    
+
     # Check iOS first (more specific)
     for device in IOS_DEVICES:
         if device in text_lower:
             return OP_PROJECTS.get("iOS", 85)
-    
+
     # Check Android devices
     for device in ANDROID_DEVICES:
         if device in text_lower:
             return OP_PROJECTS.get("Android", 3)
-    
-    # Check OS mentions
-    if "ios " in text_lower or "ios:" in text_lower:
+
+    # Check OS mentions (using regex to catch end of sentence like "Android." or just "Android")
+    if re.search(r"\bios\b", text_lower):
         return OP_PROJECTS.get("iOS", 85)
-    if "android " in text_lower or "android:" in text_lower:
+    if re.search(r"\bandroid\b", text_lower):
         return OP_PROJECTS.get("Android", 3)
-    
+
     # Default
     return OP_PROJECTS.get("Android", 3)

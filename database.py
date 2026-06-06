@@ -7,14 +7,16 @@ PERSISTENCE: DB file is synced to/from Google Cloud Storage (gs://qa-bugbot-data
 so registrations survive container restarts and new deployments.
 """
 
-import os
+import base64
+import hashlib
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from pydantic import BaseModel, field_validator
-from sqlalchemy import Column, Integer, String, DateTime, Text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy import Column, DateTime, Integer, String, Text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
 
 logger = logging.getLogger("qa_bugbot.database")
@@ -25,18 +27,96 @@ LOCAL_DB_PATH = "./data/qa_bugbot.db"
 
 
 # ─────────────────────────────────────────────
+# API key encryption at rest (Fernet symmetric)
+# Set DB_ENCRYPTION_KEY env var to enable.
+# Keys stored without this are left as-is (legacy plaintext).
+# ─────────────────────────────────────────────
+
+_ENCRYPTION_PREFIX = "enc1:"  # version tag distinguishes encrypted from plaintext
+_fernet = None  # initialized by _init_encryption()
+
+
+def _init_encryption() -> None:
+    """
+    Load the Fernet cipher from the DB_ENCRYPTION_KEY env var.
+    If the var is absent or empty, encryption is disabled (plaintext fallback).
+    Accepts either a proper URL-safe base64 Fernet key (44 chars) or any
+    passphrase (SHA-256 derived).  Never raises.
+    """
+    global _fernet
+    import os
+
+    key_str = os.environ.get("DB_ENCRYPTION_KEY", "").strip()
+    if not key_str:
+        logger.info("DB_ENCRYPTION_KEY not set — API key encryption disabled")
+        return
+    try:
+        from cryptography.fernet import Fernet
+
+        # Derive a proper 32-byte URL-safe base64 key if not already in Fernet format
+        if len(key_str) != 44:
+            derived = base64.urlsafe_b64encode(
+                hashlib.sha256(key_str.encode()).digest()
+            )
+            _fernet = Fernet(derived)
+        else:
+            _fernet = Fernet(key_str.encode())
+        logger.info("API key encryption enabled (Fernet/AES-128-CBC)")
+    except Exception as e:
+        logger.warning("DB_ENCRYPTION_KEY invalid — encryption disabled: %s", e)
+        _fernet = None
+
+
+def _encrypt_api_key(key: str) -> str:
+    """Encrypt an OpenProject API key for DB storage. No-op if encryption disabled."""
+    if not _fernet or not key:
+        return key
+    if key.startswith(_ENCRYPTION_PREFIX):
+        return key  # Already encrypted
+    encrypted = _fernet.encrypt(key.encode()).decode()
+    return f"{_ENCRYPTION_PREFIX}{encrypted}"
+
+
+def _decrypt_api_key(stored: str) -> str:
+    """Decrypt an API key read from the DB. Returns plaintext for legacy unencrypted keys."""
+    if not stored:
+        return stored
+    if not stored.startswith(_ENCRYPTION_PREFIX):
+        return stored  # Legacy plaintext key — return as-is
+    if not _fernet:
+        logger.warning(
+            "Encrypted API key found in DB but DB_ENCRYPTION_KEY is not set — "
+            "returning empty string to prevent plaintext exposure"
+        )
+        return ""
+    try:
+        return _fernet.decrypt(stored[len(_ENCRYPTION_PREFIX) :].encode()).decode()
+    except Exception as e:
+        logger.error("Failed to decrypt API key: %s", e)
+        return ""
+
+
+# ─────────────────────────────────────────────
 # GCS sync status model (Theme 2 — observability)
 # ─────────────────────────────────────────────
 
+
 class GcsSyncStatus(BaseModel):
     """Snapshot of the most recent GCS sync attempt; exposed via /health."""
+
     op: Literal["download", "upload"]
     started_at: datetime
     finished_at: datetime
     duration_ms: int
     outcome: Literal[
-        "ok", "skipped", "import_error", "auth_error",
-        "forbidden", "not_found", "network_error", "unknown_error",
+        "ok",
+        "skipped",
+        "import_error",
+        "auth_error",
+        "forbidden",
+        "not_found",
+        "network_error",
+        "unknown_error",
     ]
     bytes: int = 0
     detail: str = ""
@@ -165,8 +245,13 @@ def _download_db_from_gcs() -> GcsSyncStatus:
         finished_at = datetime.now(timezone.utc)
         duration_ms = int((finished_at - started_at).total_seconds() * 1000)
         status = GcsSyncStatus(
-            op="download", started_at=started_at, finished_at=finished_at,
-            duration_ms=duration_ms, outcome=outcome, bytes=blob_size, detail=detail,
+            op="download",
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_ms=duration_ms,
+            outcome=outcome,
+            bytes=blob_size,
+            detail=detail,
         )
         logger.info(status.to_log_string())
         _last_gcs_sync = status
@@ -176,7 +261,9 @@ def _download_db_from_gcs() -> GcsSyncStatus:
     try:
         # Lazy import of typed exception classes
         try:
-            from google.api_core import exceptions as gax  # type: ignore[import-untyped]
+            from google.api_core import (
+                exceptions as gax,  # type: ignore[import-untyped]
+            )
         except ImportError:
             gax = None
         try:
@@ -200,13 +287,17 @@ def _download_db_from_gcs() -> GcsSyncStatus:
     except Exception as e:
         cls_name = type(e).__name__
         # Typed-exception classification
-        if 'gauth' in dir() and gauth is not None and isinstance(e, gauth.DefaultCredentialsError):
+        if (
+            "gauth" in dir()
+            and gauth is not None
+            and isinstance(e, gauth.DefaultCredentialsError)
+        ):
             outcome = "auth_error"
             detail = f"no ADC available: {e}"
-        elif 'gax' in dir() and gax is not None and isinstance(e, gax.Forbidden):
+        elif "gax" in dir() and gax is not None and isinstance(e, gax.Forbidden):
             outcome = "forbidden"
             detail = f"service account lacks objectAdmin: {e}"
-        elif 'gax' in dir() and gax is not None and isinstance(e, gax.NotFound):
+        elif "gax" in dir() and gax is not None and isinstance(e, gax.NotFound):
             outcome = "not_found"
             detail = f"bucket or blob missing: {e}"
         elif isinstance(e, (TimeoutError, ConnectionError, OSError)):
@@ -261,8 +352,13 @@ def _upload_db_to_gcs() -> GcsSyncStatus:
         finished_at = datetime.now(timezone.utc)
         duration_ms = int((finished_at - started_at).total_seconds() * 1000)
         status = GcsSyncStatus(
-            op="upload", started_at=started_at, finished_at=finished_at,
-            duration_ms=duration_ms, outcome=outcome, bytes=file_size, detail=detail,
+            op="upload",
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_ms=duration_ms,
+            outcome=outcome,
+            bytes=file_size,
+            detail=detail,
         )
         logger.info(status.to_log_string())
         _last_gcs_sync = status
@@ -277,8 +373,13 @@ def _upload_db_to_gcs() -> GcsSyncStatus:
         finished_at = datetime.now(timezone.utc)
         duration_ms = int((finished_at - started_at).total_seconds() * 1000)
         status = GcsSyncStatus(
-            op="upload", started_at=started_at, finished_at=finished_at,
-            duration_ms=duration_ms, outcome=outcome, bytes=file_size, detail=detail,
+            op="upload",
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_ms=duration_ms,
+            outcome=outcome,
+            bytes=file_size,
+            detail=detail,
         )
         logger.info(status.to_log_string())
         _last_gcs_sync = status
@@ -287,7 +388,9 @@ def _upload_db_to_gcs() -> GcsSyncStatus:
     # Main upload path
     try:
         try:
-            from google.api_core import exceptions as gax  # type: ignore[import-untyped]
+            from google.api_core import (
+                exceptions as gax,  # type: ignore[import-untyped]
+            )
         except ImportError:
             gax = None
         try:
@@ -304,13 +407,17 @@ def _upload_db_to_gcs() -> GcsSyncStatus:
         detail = "synced to GCS"
     except Exception as e:
         cls_name = type(e).__name__
-        if 'gauth' in dir() and gauth is not None and isinstance(e, gauth.DefaultCredentialsError):
+        if (
+            "gauth" in dir()
+            and gauth is not None
+            and isinstance(e, gauth.DefaultCredentialsError)
+        ):
             outcome = "auth_error"
             detail = f"no ADC available: {e}"
-        elif 'gax' in dir() and gax is not None and isinstance(e, gax.Forbidden):
+        elif "gax" in dir() and gax is not None and isinstance(e, gax.Forbidden):
             outcome = "forbidden"
             detail = f"service account lacks objectAdmin: {e}"
-        elif 'gax' in dir() and gax is not None and isinstance(e, gax.NotFound):
+        elif "gax" in dir() and gax is not None and isinstance(e, gax.NotFound):
             outcome = "not_found"
             detail = f"bucket missing: {e}"
         elif isinstance(e, (TimeoutError, ConnectionError, OSError)):
@@ -340,8 +447,10 @@ def _upload_db_to_gcs() -> GcsSyncStatus:
 # SQLAlchemy Table Definition
 # ─────────────────────────────────────────────
 
+
 class TesterRegistration(Base):
     """Registered users table — maps Google Chat users to OpenProject API keys."""
+
     __tablename__ = "tester_registrations"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -351,8 +460,11 @@ class TesterRegistration(Base):
     openproject_user_id = Column(String(50), nullable=True)
     openproject_user_name = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
-                        onupdate=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
 
 # ─────────────────────────────────────────────
@@ -365,6 +477,7 @@ _session_factory = None
 
 async def init_database(database_url: str) -> None:
     """Initialize the database engine and create tables."""
+    _init_encryption()
     global _engine, _session_factory
 
     # Ensure data directory exists
@@ -373,7 +486,7 @@ async def init_database(database_url: str) -> None:
         db_dir = os.path.dirname(db_path)
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
-        
+
         # Download DB from GCS (restores registrations from previous deployments)
         download_status = _download_db_from_gcs()
         # Only allow uploads if we proved the local DB is in sync with GCS
@@ -389,7 +502,9 @@ async def init_database(database_url: str) -> None:
             )
 
     _engine = create_async_engine(database_url, echo=False)
-    _session_factory = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
+    _session_factory = async_sessionmaker(
+        _engine, class_=AsyncSession, expire_on_commit=False
+    )
 
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -418,16 +533,23 @@ def get_session() -> AsyncSession:
 # CRUD Operations
 # ─────────────────────────────────────────────
 
+
 async def get_user_by_chat_id(chat_user_name: str) -> Optional[TesterRegistration]:
     """Fetch a user by their Google Chat user name (resource ID)."""
     from sqlalchemy import select
+
     async with get_session() as session:
         result = await session.execute(
             select(TesterRegistration).where(
                 TesterRegistration.chat_user_name == chat_user_name
             )
         )
-        return result.scalar_one_or_none()
+        registration = result.scalar_one_or_none()
+        if registration:
+            registration.openproject_api_key = _decrypt_api_key(
+                registration.openproject_api_key
+            )
+        return registration
 
 
 async def create_or_update_user(
@@ -439,6 +561,7 @@ async def create_or_update_user(
 ) -> TesterRegistration:
     """Create a new user or update an existing one."""
     from sqlalchemy import select
+
     async with get_session() as session:
         result = await session.execute(
             select(TesterRegistration).where(
@@ -450,7 +573,7 @@ async def create_or_update_user(
         if user:
             # Update existing user
             user.chat_display_name = chat_display_name
-            user.openproject_api_key = openproject_api_key
+            user.openproject_api_key = _encrypt_api_key(openproject_api_key)
             user.openproject_user_id = openproject_user_id
             user.openproject_user_name = openproject_user_name
             user.updated_at = datetime.now(timezone.utc)
@@ -460,7 +583,7 @@ async def create_or_update_user(
             user = TesterRegistration(
                 chat_user_name=chat_user_name,
                 chat_display_name=chat_display_name,
-                openproject_api_key=openproject_api_key,
+                openproject_api_key=_encrypt_api_key(openproject_api_key),
                 openproject_user_id=openproject_user_id,
                 openproject_user_name=openproject_user_name,
             )
@@ -469,11 +592,11 @@ async def create_or_update_user(
 
         await session.commit()
         await session.refresh(user)
-    
+
     # Sync to GCS immediately after registration change (guarded — won't run
     # if init_database's download failed, protecting existing GCS data)
     _safe_upload_db_to_gcs()
-    
+
     return user
 
 
@@ -481,6 +604,7 @@ async def check_database_health() -> bool:
     """Check if the database is accessible."""
     try:
         from sqlalchemy import text
+
         async with get_session() as session:
             await session.execute(text("SELECT 1"))
         return True

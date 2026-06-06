@@ -7,13 +7,16 @@ Handles text, images, videos (frame extraction), and audio.
 import base64
 import json
 import logging
-from typing import Optional, List, Dict, Any, NamedTuple
+from typing import Any, Dict, List, NamedTuple, Optional
 
 from openai import OpenAI
 
 from models import (
-    ExtractedBugReport, BugType, EnvironmentType,
-    PriorityLevel, PlatformType,
+    BugType,
+    EnvironmentType,
+    ExtractedBugReport,
+    PlatformType,
+    PriorityLevel,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,6 +39,7 @@ class Phase2TruncatedError(Exception):
     Should rarely fire in normal operation given max_tokens=6000 (Theme 3.2).
     Both Phase 1 and Phase 2 callers catch this and fall back appropriately.
     """
+
     def __init__(self, repair_log: List[str], preview: str):
         self.repair_log = repair_log
         self.preview = preview
@@ -49,9 +53,10 @@ class JsonCleanResult(NamedTuple):
     of returning a result, so `was_truncated` is always False on the result
     path and `repair_log` is always empty.
     """
-    cleaned: str            # JSON-parseable text after stripping markdown fences
-    was_truncated: bool     # always False on the result path (kept for forward-compat)
-    repair_log: List[str]   # always empty on the result path
+
+    cleaned: str  # JSON-parseable text after stripping markdown fences
+    was_truncated: bool  # always False on the result path (kept for forward-compat)
+    repair_log: List[str]  # always empty on the result path
 
 
 # ─────────────────────────────────────────────
@@ -100,10 +105,16 @@ def _detect_default_stuffing(report: ExtractedBugReport) -> tuple[bool, list[str
     ):
         reasons.append("a:steps_to_reproduce_placeholder")
 
-    if report.actual_behavior in DEFAULT_STUFFING_MARKERS["actual_behavior_placeholders"]:
+    if (
+        report.actual_behavior
+        in DEFAULT_STUFFING_MARKERS["actual_behavior_placeholders"]
+    ):
         reasons.append("b:actual_behavior_placeholder")
 
-    if report.expected_behavior in DEFAULT_STUFFING_MARKERS["expected_behavior_placeholders"]:
+    if (
+        report.expected_behavior
+        in DEFAULT_STUFFING_MARKERS["expected_behavior_placeholders"]
+    ):
         reasons.append("c:expected_behavior_placeholder")
 
     if (
@@ -123,8 +134,8 @@ def _detect_default_stuffing(report: ExtractedBugReport) -> tuple[bool, list[str
 # call (Phase 1, Phase 2, smoke test, content screen) emits exactly one
 # `LLM_CALL phase=… outcome=… duration_ms=…` line so /logs greppable.
 
-import time as _time
 import re as _re
+import time as _time
 
 
 class LLMGatewayError(Exception):
@@ -161,11 +172,20 @@ def _classify_gateway_exception(exc: BaseException) -> str:
         return "auth_error"
 
     # Rate limit
-    if "ratelimit" in lname or "429" in msg or "rate limit" in lmsg or "too many" in lmsg:
+    if (
+        "ratelimit" in lname
+        or "429" in msg
+        or "rate limit" in lmsg
+        or "too many" in lmsg
+    ):
         return "rate_limit"
 
     # Server-side gateway failure
-    if "internalserver" in lname or "badgateway" in lname or "serviceunavailable" in lname:
+    if (
+        "internalserver" in lname
+        or "badgateway" in lname
+        or "serviceunavailable" in lname
+    ):
         return "server_error"
     if _re.search(r"\b50[0234]\b", msg):
         return "server_error"
@@ -175,7 +195,11 @@ def _classify_gateway_exception(exc: BaseException) -> str:
     # Network / connection
     if "connection" in lname or "timeout" in lname or "apiconnection" in lname:
         return "network_error"
-    if "timed out" in lmsg or "connection refused" in lmsg or "could not connect" in lmsg:
+    if (
+        "timed out" in lmsg
+        or "connection refused" in lmsg
+        or "could not connect" in lmsg
+    ):
         return "network_error"
 
     return "unknown_error"
@@ -215,7 +239,11 @@ def _log_llm_call(
     logger.log(
         level,
         "LLM_CALL phase=%s outcome=%s duration_ms=%d %s%s",
-        phase, outcome, duration_ms, detail, extra_str,
+        phase,
+        outcome,
+        duration_ms,
+        detail,
+        extra_str,
     )
     return outcome
 
@@ -227,75 +255,96 @@ def _log_llm_call(
 SYSTEM_PROMPT = """You are an expert QA Bug Report Analyst for IndiaMART mobile and web applications.
 You MUST respond with valid JSON matching the schema below. No markdown, no explanation, no commentary.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ## JSON SCHEMA (all fields required)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {
-  "title": "string — Concise bug title (50-120 chars)",
-  "actual_behavior": "string — What actually happens",
-  "expected_behavior": "string — What should happen",
+  "title": "Concise bug title (50-120 chars). Format: [Feature] does not [work] on [Screen].",
+  "actual_behavior": "2-3 sentences: (1) what the user was doing, (2) the unexpected outcome that occurred, (3) any visible error text or UI state. Do NOT simply repeat or lowercase the title.",
+  "expected_behavior": "The correct outcome from the user's perspective. Do NOT negate actual_behavior by just adding 'should'. For crashes: describe graceful recovery. For wrong values: state the correct value. For broken CTAs: describe what the tap should trigger.",
   "steps_to_reproduce": ["Step 1", "Step 2", "..."],
-  "device": "string — Device model or 'Desktop' or 'Not specified'",
-  "operating_system": "string — OS version or 'Not specified'",
-  "environment": "string — 'LIVE' or 'STAGE'",
-  "app_version": "string — App version or 'Not specified'",
-  "bug_type": "string — 'UI/UX' or 'Functional/Logical' or 'Network' or 'Content'",
-  "priority": "string — 'High' or 'Medium' or 'Low'",
-  "logs_or_links": "string or null"
+  "device": "Device model, or 'Desktop', or 'Not specified'",
+  "operating_system": "OS name and version, or 'Not specified'",
+  "environment": "'LIVE' or 'STAGE'",
+  "app_version": "App version string, or 'Not specified'",
+  "bug_type": "'UI/UX' or 'Functional/Logical' or 'Network' or 'Content'",
+  "priority": "'High' or 'Medium' or 'Low'",
+  "logs_or_links": "URL or log reference, or null"
 }
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-## STEPS TO REPRODUCE — STRICT RULES 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-### RULE 1 — EXPAND STANDARD FLOWS (DOMAIN KNOWLEDGE)
-If the tester mentions a known standard action (like "Purchase Buy Lead" or "Send Message"), you MUST use your domain knowledge of IndiaMART to write out the standard intermediate UI steps (e.g., "Tap on any Buy Lead card", "Tap on Contact Buyer Now CTA") needed to reach that action, even if the tester abbreviated them.
+## STEPS TO REPRODUCE
 
-### RULE 2 — ONLY USE WHAT THE TESTER GAVE YOU (OUTSIDE OF KNOWN FLOWS)
-For non-standard actions, every step must come from the tester's brief. Do not invent custom button names if they are not part of a standard IndiaMART flow.
-
-### RULE 3 — STEP 1 IS ALWAYS LOGIN
-Format depends on what the tester provided:
+### RULE 1 — STEP 1: LOGIN (with exceptions)
+Default: Step 1 = "Login as [account]"
   - Tester gave account ID (e.g. "1002520031") → "Login as 1002520031"
-  - Tester gave account type (e.g. "paid seller") → "Login as paid seller"
-  - Tester gave no account info → "Login as seller" (Android) or "Login as buyer" (iOS buyer)
-  NEVER invent an account ID. NEVER copy an account ID from a RAG example.
+  - Tester gave account type (e.g. "paid seller") → "Login as paid seller account"
+  - No account info → "Login as seller" (Android) / "Login as buyer" (iOS buyer context)
 
-### RULE 4 — STEP 2 IS ALWAYS NAVIGATION
-Use the exact screen/feature name the tester mentioned:
-  - "Navigate to seller dashboard" / "Open LMS listing screen"
-  - If tester mentioned no screen → infer ONLY from the feature name in the bug title.
+Exceptions — do NOT use Login as Step 1 when:
+  A) Bug is on the login / OTP / onboarding / sign-up screen → Step 1: "Open the app"
+  B) Entry point is a push notification → Step 1: "Tap the [feature] push notification"
+  C) Entry point is a deep link / intent URL → Step 1: "Open deep link to [destination]"
 
-### RULE 5 — MIDDLE STEPS ARE EXACT ACTIONS
-  - Use the tester's exact CTA/button name OR the standard IndiaMART flow buttons.
-  - If tester described a precondition (e.g. "where GST is verified") → make it a step.
+NEVER invent an account ID. NEVER copy an account ID from a reference example.
 
-### RULE 6 — LAST STEP IS ALWAYS OBSERVATION
-  - "Observe that [exact issue from tester's brief]"
-  - Copy the tester's exact words for the issue — do not rephrase.
+### RULE 2 — STEP 2: NAVIGATION (with exceptions)
+Default: Step 2 = "Navigate to [exact screen name]"
+  - Use the exact screen name the tester mentioned
+  - If screen not mentioned → infer ONLY from the feature name in the bug title
 
-### RULE 7 — STEP COUNT
-  - Minimum: 2 steps
-  - Maximum: 8 steps (never exceed this)
+Exceptions — skip or fold navigation into Step 1 when:
+  A) Bug is on the login / OTP screen → user is already on the target screen, skip this step
+  B) Entry was a notification or deep link → navigation was already covered in Step 1
 
-### RULE 8 — FORBIDDEN PATTERNS (HALLUCINATIONS)
-  ❌ "Open the app" — too generic, replace with specific screen.
-  ❌ "Go to the page" — use the exact name.
-  ❌ Any account ID not explicitly mentioned by the tester.
-  ❌ Steps that describe expected behavior ("Verify that X works").
+### RULE 3 — MIDDLE STEPS (exact actions only)
+Use ONLY what the tester explicitly stated. Use the tester's exact CTA/button names.
+Convert preconditions to steps: "where GST is verified" → "Ensure GST is verified for the account".
 
-### RULE 9 — WHEN THE BRIEF IS VAGUE (AND NOT A STANDARD FLOW)
-  Write only what you know for certain:
+KNOWN standard flows you may expand (ONLY when the tester explicitly names the action):
+  "Purchase Buy Lead" → ["Tap on any BL card in the listing", "Tap 'Contact Buyer Now' CTA", "On the Subscription Plan screen, tap 'Purchase Buy Lead'"]
+  "Send message via BMC" → ["Open Buyer Message Centre", "Tap on any conversation thread", "Type and send a message"]
+  "Add/upload product" → ["Navigate to My Products", "Tap 'Add Product'"]
+
+For any action NOT in the list above: do NOT expand. Use only the tester's own words.
+
+### RULE 4 — LAST STEP: OBSERVATION
+Always: "Observe that [exact issue from tester's brief]"
+Copy the tester's exact wording — do not rephrase or summarize.
+
+### RULE 5 — STEP COUNT
+Minimum 2 steps. Maximum 8 steps. Never exceed 8.
+
+### RULE 6 — FORBIDDEN PATTERNS
+❌ "Open the app" as a middle or generic step (allowed ONLY for login/onboarding bugs per Rule 1A)
+❌ "Go to the page" — use the exact screen name
+❌ Any account ID the tester did not provide
+❌ CTA names not stated by the tester and not in the known flows above
+❌ Steps that describe expected behavior ("Verify that X works correctly")
+
+### RULE 7 — WHEN THE BRIEF IS VAGUE
+Write only what you know with certainty:
   Step 1: Login as seller
-  Step 2: Navigate to [feature name]
+  Step 2: Navigate to [feature name from title]
   Step 3: Observe that [exact issue]
-  Do NOT invent intermediate steps unless it is a standard IndiaMART flow (Rule 1).
+Do NOT add intermediate steps unless the tester described them.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-## OTHER FIELDS (PRIORITY & ENVIRONMENT)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- High Priority: ONLY for app crash, complete login failure, payment fully broken, data loss.
-- Medium Priority: DEFAULT for almost all bugs.
-- Environment: Default to "STAGE" unless "live" is explicitly mentioned.
+## HOW TO USE THE REFERENCE TEST CASE (when one appears below)
+A matching sanity test case may appear in the context below.
+It shows the NORMAL WORKING FLOW for the feature being tested.
+
+When a Reference Test Case is present:
+  ✅ Use its exact screen names and CTA names for intermediate steps
+  ✅ Use its preconditions to determine the correct "Login as [user type]"
+  ✅ Use it to fill in steps the tester abbreviated (e.g. "purchased BL" → expand using test case steps)
+  ❌ Do NOT copy its expected outcomes into expected_behavior
+  ❌ Do NOT add steps from the test case that come AFTER the point where the bug occurred
+  The tester's brief tells you WHERE it broke — that is your last step ("Observe that...")
+
+When NO Reference Test Case is present: use Rule 7 (vague brief fallback).
+
+## PRIORITY & ENVIRONMENT
+- High: ONLY for app crash, complete login failure, payment fully broken, data loss.
+- Medium: Default for almost all bugs.
+- Low: Only for purely cosmetic/visual issues with zero functional impact.
+- Environment: Default to "STAGE" unless "live", "production", or "prod" is explicitly mentioned.
 """
 
 
@@ -313,8 +362,8 @@ Use the exact screen/feature name the tester mentioned:
 # Capped at 5 examples (~3-4K tokens) to bound Phase 1 latency cost.
 
 import json as _json_for_loader
-from pathlib import Path as _Path
 import re as _re_for_loader
+from pathlib import Path as _Path
 
 
 def _synthesize_qa_brief(example: dict) -> str:
@@ -368,6 +417,7 @@ def _format_example(example: dict) -> str:
             return s
         try:
             import html as _html
+
             s = _html.unescape(s)
         except Exception:
             pass
@@ -384,7 +434,8 @@ def _format_example(example: dict) -> str:
     def _section(name: str) -> str:
         m = _re_for_loader.search(
             rf"###\s*\*+\s*{name}\s*[:\*]*\s*\n+(.*?)(?=\n###|\Z)",
-            desc, flags=_re_for_loader.DOTALL | _re_for_loader.IGNORECASE,
+            desc,
+            flags=_re_for_loader.DOTALL | _re_for_loader.IGNORECASE,
         )
         if not m:
             return ""
@@ -393,7 +444,9 @@ def _format_example(example: dict) -> str:
         body = body.strip("*").strip()
         return _normalise(body)
 
-    actual = _section("Actual Behavior") or _normalise(example.get("subject", "Not specified"))
+    actual = _section("Actual Behavior") or _normalise(
+        example.get("subject", "Not specified")
+    )
     expected = _section("Expected Behavior") or "See actual behavior"
     steps_raw = _section("Steps to reproduce")
     # Steps are numbered like "1.  text" — split on numbered lines
@@ -408,10 +461,12 @@ def _format_example(example: dict) -> str:
 
     # Device + OS extracted earlier
     dev_match = _re_for_loader.search(
-        r"\*\*Device:?\*\*[:\s]*([A-Za-z0-9 ]+?)(?:\n|$|\*)", desc,
+        r"\*\*Device:?\*\*[:\s]*([A-Za-z0-9 ]+?)(?:\n|$|\*)",
+        desc,
     )
     os_match = _re_for_loader.search(
-        r"\*\*Operating System:?\*\*[:\s]*([A-Za-z0-9 .]+?)(?:\n|$|\*)", desc,
+        r"\*\*Operating System:?\*\*[:\s]*([A-Za-z0-9 .]+?)(?:\n|$|\*)",
+        desc,
     )
 
     output = {
@@ -420,7 +475,9 @@ def _format_example(example: dict) -> str:
         "expected_behavior": expected[:400],
         "steps_to_reproduce": steps[:8],
         "device": (dev_match.group(1).strip() if dev_match else "Not specified"),
-        "operating_system": (os_match.group(1).strip() if os_match else "Not specified"),
+        "operating_system": (
+            os_match.group(1).strip() if os_match else "Not specified"
+        ),
         "environment": (example.get("environment") or "STAGE").upper(),
         "app_version": "Not specified",
         "bug_type": example.get("bug_type") or "Functional/Logical",
@@ -455,13 +512,37 @@ def _load_few_shot_block(max_examples: int = 50) -> str:
         examples = _json_for_loader.loads(raw)
         if not isinstance(examples, list) or not examples:
             return ""
-        # Filter out entries missing required fields (e.g. bug_type=None)
+        # Filter 1: must have all required fields
         valid = [
-            e for e in examples
+            e
+            for e in examples
             if e.get("bug_type") and e.get("priority") and e.get("subject")
         ]
         if not valid:
             return ""
+
+        # Filter 2: skip entries with corrupted/noisy content that would teach
+        # the LLM bad patterns.
+        def _is_quality_example(e: dict) -> bool:
+            desc = e.get("description_raw") or ""
+            # Skip entries where actual_behavior is just an image attachment URL
+            if "<img" in desc or "op-uc-image" in desc:
+                return False
+            # Skip entries with unfilled template placeholder steps
+            dl = desc.lower()
+            if any(
+                p in dl for p in ("go to page x", "click on button y", "select foo")
+            ):
+                return False
+            # Skip entries with no steps section at all
+            if "steps to reproduce" not in dl:
+                return False
+            return True
+
+        valid = [e for e in valid if _is_quality_example(e)]
+        if not valid:
+            return ""
+
         # Pick the first N — extract_training.py already de-duplicated by
         # (project, bug_type, priority) for diversity.
         chosen = valid[:max_examples]
@@ -472,7 +553,9 @@ def _load_few_shot_block(max_examples: int = 50) -> str:
         )
         logger.info(
             "Few-shot loaded: %d examples from %s (%d chars)",
-            len(chosen), path.name, len(block),
+            len(chosen),
+            path.name,
+            len(block),
         )
         return block
     except Exception as e:
@@ -481,7 +564,10 @@ def _load_few_shot_block(max_examples: int = 50) -> str:
         return ""
 
 
-_FEW_SHOT_BLOCK = _load_few_shot_block(max_examples=50)
+# Static fallback: 10 diverse examples keep style-anchoring with ~2.5K tokens
+# instead of 50 examples (~12K tokens). RAG handles quality retrieval when warm;
+# this fallback is only hit on cold start or when the RAG index is unavailable.
+_FEW_SHOT_BLOCK = _load_few_shot_block(max_examples=10)
 SYSTEM_PROMPT_BASE = SYSTEM_PROMPT
 SYSTEM_PROMPT = SYSTEM_PROMPT_BASE + _FEW_SHOT_BLOCK
 
@@ -501,96 +587,72 @@ with NO software UI visible anywhere → respond exactly:
   {{"is_valid": false, "reason": "Not a software screenshot"}}
 Otherwise proceed with the full bug analysis below.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CONTEXT: TWO-SOURCE TRUTH MODEL
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-You are a senior QA engineer watching a screen recording of a mobile app bug.
-The tester sent a brief text message and attached a video or screenshot.
-Your job: produce a complete, accurate bug ticket by combining BOTH sources.
+## TWO-SOURCE TRUTH MODEL
+You are a senior QA engineer reviewing a screen recording of a mobile app bug.
+The tester sent a text brief AND attached a video or screenshot.
+Combine BOTH to produce the most accurate possible bug ticket.
 
-CONFLICT RULE: When brief and video disagree — VIDEO wins for steps, BRIEF wins for everything else.
+CONFLICT RULE: VIDEO wins for steps_to_reproduce. BRIEF wins for everything else.
 
 TESTER BRIEF (text) owns:
-  → account ID (if tester mentioned one)
-  → device name, OS version, environment
-  → what is broken (title, actual_behavior, expected_behavior)
-  → priority signal
+  → account ID (if stated), device, OS, environment, priority
+  → title, actual_behavior, expected_behavior
 
 VIDEO / SCREENSHOT owns:
   → steps_to_reproduce (read frames sequentially like a story)
-  → exact screen names (read header/title bar in each frame)
-  → exact CTA/button text (read UI elements in each frame)
-  → error messages (read any toast or error text visible)
+  → exact screen names visible in headers/title bars
+  → exact CTA/button text visible in frames
+  → error messages / toasts visible in the last frame
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-INITIAL TEXT ANALYSIS (FROM PHASE 1)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## PHASE 1 ANALYSIS (already done from the text brief)
 {initial_json}
 
 TESTER'S ORIGINAL BRIEF (verbatim):
 {original_brief}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-HOW TO READ THE VIDEO FRAMES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-The frames are in CHRONOLOGICAL ORDER. Read them like a silent film — left to right, in sequence.
+## HOW TO READ THE VIDEO FRAMES
+Frames are in CHRONOLOGICAL ORDER. Read them like a silent film.
 
-FRAME 1 — Always answers: "What screen is the user starting from?"
-  → This becomes your navigation step: "Open [screen name visible in frame 1]"
+FRAME 1 — "What screen is the user starting from?" → "Navigate to [screen name in frame 1]"
+FRAMES 2 to N-1 — "What did the user just do?" → one step per visible user action
+  → Look for: taps, highlighted buttons, new screens, popups, error dialogs
+  → Skip frames where nothing changed
+LAST FRAME — "What went wrong?" → "Observe that [exact issue / error text visible]"
 
-FRAME 2 to N-1 — Each frame answers: "What did the user just do?"
-  → Look for: finger tap indicators, highlighted buttons, new screens, popups, loaders.
-  → Each visible USER ACTION = one step.
-  → Do NOT write a step for frames where nothing changed.
+## STEP CONSTRUCTION FROM VIDEO
+Step 1 — Login: Use account ID from brief if given; else "Login as seller" (Android) / "Login as buyer" (iOS)
+Step 2 — Navigate to [exact screen name from frame 1]
+Middle steps — "Tap on [exact button text] CTA" (one per visible user action)
+Last step — "Observe that [exact issue from last frame]"
 
-LAST FRAME — Always answers: "What went wrong?"
-  → This becomes your observation step: "Observe that [exact issue visible in last frame]"
-  → If error text is visible → copy it exactly.
+ANTI-HALLUCINATION:
+  ❌ Do NOT write steps for things not visible in any frame
+  ❌ Do NOT copy Phase 1 steps if the video shows a different flow
+  ✅ Video evidence always overrides Phase 1 for steps
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP CONSTRUCTION FROM VIDEO
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Step 1 — Login:
-  - If tester gave account ID in brief → "Login as [ID from brief]"
-  - If account ID visible in video → "Login as [ID from video]"
-  - If nothing → "Login as seller" (Android default)
+## ACTUAL AND EXPECTED BEHAVIOR (from video evidence)
+actual_behavior: Update if the video reveals more detail than the brief.
+  Format: (1) what the user did, (2) the unexpected outcome seen in the video, (3) exact error text if any toast/dialog is visible.
+expected_behavior: What the feature should do. Refine from Phase 1 if video makes the failure clearer.
+  Do NOT just negate actual_behavior. Describe the correct outcome.
 
-Step 2 — Navigation:
-  - "Open [exact screen name from frame 1 header]"
-
-Steps 3 to N-1 — Actions:
-  - "Tap on [exact button text] CTA"
-  - Skip frames where nothing changed.
-
-Last Step — Observation:
-  - "Observe that [exact issue]"
-
-ANTI-HALLUCINATION RULES FOR VIDEO:
-  ❌ Do NOT write steps for things NOT visible in any frame.
-  ❌ Do NOT copy steps from the Phase 1 text analysis if video shows something different.
-  ✅ Video evidence ALWAYS overrides Phase 1 text analysis for steps.
-  ✅ If video shows 3 actions → write 3 steps, not 6.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OUTPUT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## OUTPUT
 Respond with exactly this JSON shape, no markdown:
 {{
   "is_valid": true,
   "title": "...",
-  "actual_behavior": "...",
-  "expected_behavior": "...",
+  "actual_behavior": "2-3 sentences: what user did + unexpected outcome + error text seen",
+  "expected_behavior": "Correct outcome (not a negation of actual). Describe graceful behavior.",
   "steps_to_reproduce": ["Login as ...", "Navigate to ...", "Tap on ...", "Observe that ..."],
-  "device": "...",
-  "operating_system": "...",
-  "environment": "STAGE",
-  "app_version": "...",
-  "bug_type": "Functional/Logical",
-  "priority": "Medium",
+  "device": "from brief or 'Not specified'",
+  "operating_system": "from brief or 'Not specified'",
+  "environment": "{initial_environment}",
+  "app_version": "from brief or 'Not specified'",
+  "bug_type": "{initial_bug_type}",
+  "priority": "{initial_priority}",
   "logs_or_links": null
 }}
 """
-
 
 
 def _render_examples_block(examples: list) -> str:
@@ -600,6 +662,7 @@ def _render_examples_block(examples: list) -> str:
         + "\n\n---\n\n".join(rendered)
     )
     return block
+
 
 class GeminiClient:
     """
@@ -613,7 +676,6 @@ class GeminiClient:
         self.model = model
         logger.info(f"LLM client initialized: model={model}, base_url={base_url}")
 
-
     def _build_fewshot_block(
         self,
         *,
@@ -621,69 +683,92 @@ class GeminiClient:
         project_id: Optional[int],
         phase: str,
     ) -> tuple[str, dict]:
+        # ────────────────────────────────────────────────────────────────────────────────
+        # Layer A — TestLink reference test case (domain knowledge: how feature WORKS)
+        # Retrieves the single most similar sanity test case for the given brief.
+        # Placed FIRST in the block so the LLM reads it before the style examples.
+        # ────────────────────────────────────────────────────────────────────────────────
+        testlink_block = ""
+        tl_meta: dict = {"testlink": "unavailable"}
+        try:
+            from testlink_retriever import get_testlink_retriever
+
+            tl_ret = get_testlink_retriever()
+            if tl_ret is not None and tl_ret.is_ready():
+                tc = tl_ret.retrieve(query=query)
+                if tc:
+                    testlink_block = tl_ret.format_for_prompt(tc)
+                    tl_meta = {
+                        "testlink": "matched",
+                        "tc_id": tc["tc_id"],
+                        "tc_name": tc["name"][:60],
+                        "score": round(tc["score"], 3),
+                    }
+                    logger.info(
+                        "TESTLINK_CONTEXT tc_id=%s score=%.2f name=%r",
+                        tc["tc_id"],
+                        tc["score"],
+                        tc["name"][:60],
+                    )
+                else:
+                    tl_meta = {"testlink": "no_match"}
+        except Exception as _tl_err:
+            logger.debug("TestLink retriever skipped: %s", _tl_err)
+
+        # ────────────────────────────────────────────────────────────────────────────────
+        # Layer B — Bug corpus RAG examples (style + format reference)
+        # Top-5 semantically similar past bug tickets showing the expected output format.
+        # ────────────────────────────────────────────────────────────────────────────────
         from bug_retriever import get_retriever
+
         retriever = get_retriever()
         examples = []
         outcome = "index_unavailable"
         if retriever is not None:
             try:
                 import os
+
                 top_k = int(os.environ.get("RAG_TOPK", "5"))
                 examples = retriever.retrieve(
-                    query=query, k=top_k,
-                    project_filter=project_id, phase=phase,
+                    query=query,
+                    k=top_k,
+                    project_filter=project_id,
+                    phase=phase,
                 )
-                outcome = getattr(retriever, "_last_retrieve_outcome", "ok") if examples else "empty_corpus"
+                outcome = (
+                    getattr(retriever, "_last_retrieve_outcome", "ok")
+                    if examples
+                    else "empty_corpus"
+                )
             except Exception as e:
                 logger.warning("RAG_RETRIEVE unexpected raise: %s", e)
                 examples = []
                 outcome = "embed_error"
+
+        # Determine bug_block and source without overwriting outcome
+        # (outcome preserves the retriever's diagnostic: index_unavailable,
+        # embed_error, ok, etc. — tests depend on this being unchanged)
         if examples:
-            block = _render_examples_block(examples)
-            return block, {"count": len(examples), "outcome": outcome, "source": "retrieved"}
-        if _FEW_SHOT_BLOCK:
-            return _FEW_SHOT_BLOCK, {"count": 50, "outcome": outcome, "source": "static"}
-        return "", {"count": 0, "outcome": outcome, "source": "empty"}
+            bug_block = _render_examples_block(examples)
+            bug_source = "retrieved"
+        elif _FEW_SHOT_BLOCK:
+            bug_block = _FEW_SHOT_BLOCK
+            bug_source = "static"
+        else:
+            bug_block = ""
+            bug_source = "empty"
 
-    async def analyze_bug_report(
-        self,
-        text: str,
-        media_items: Optional[List[Dict[str, Any]]] = None,
+        combined = testlink_block + bug_block
+        return combined, {
+            "count": len(examples) if examples else (10 if _FEW_SHOT_BLOCK else 0),
+            "outcome": outcome,
+            "source": bug_source,
+            **tl_meta,
+        }
+
+    async def analyze_text_brief(
+        self, text: str, project_id: Optional[int] = None
     ) -> ExtractedBugReport:
-        """
-        Two-phase bug report analysis:
-        Phase 1: Analyze QA text brief (fast, ~5-10s)
-        Phase 2: Enrich with media evidence (if media exists, ~30-120s for video)
-
-        If Phase 2 fails, falls back to Phase 1 result so a ticket is always created.
-        """
-        # Phase 1: Text-only analysis (always runs first)
-        logger.info("═" * 40)
-        logger.info("PHASE 1: Analyzing QA text brief...")
-        initial_report = await self.analyze_text_brief(text, project_id=None)
-        logger.info(f"PHASE 1 COMPLETE: {initial_report.title}")
-        logger.info("═" * 40)
-
-        # Phase 2: Media enrichment (only if media exists)
-        if media_items:
-            logger.info("═" * 40)
-            logger.info(f"PHASE 2: Enriching with {len(media_items)} media items...")
-            try:
-                enriched_result = await self.enrich_with_media(text, initial_report, media_items, project_id=None)
-                if isinstance(enriched_result, dict) and not enriched_result.get("is_valid", True):
-                    logger.info("PHASE 2 COMPLETE: Media rejected by inline screening")
-                    logger.info("═" * 40)
-                    return enriched_result
-                logger.info(f"PHASE 2 COMPLETE: {enriched_result.title}")
-                logger.info("═" * 40)
-                return enriched_result
-            except Exception as e:
-                logger.error(f"PHASE 2 FAILED, using Phase 1 result: {e}")
-                return initial_report
-
-        return initial_report
-
-    async def analyze_text_brief(self, text: str, project_id: Optional[int] = None) -> ExtractedBugReport:
         """
         Phase 1: Fast text-only analysis of the QA brief.
         Single attempt, no retries (must complete within 25s webhook deadline).
@@ -691,16 +776,20 @@ class GeminiClient:
         """
         import asyncio
 
-
-        fewshot_block, rag_meta = self._build_fewshot_block(query=text, project_id=project_id, phase="phase1")
+        fewshot_block, rag_meta = self._build_fewshot_block(
+            query=text, project_id=project_id, phase="phase1"
+        )
         system_prompt = SYSTEM_PROMPT_BASE + fewshot_block
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Analyze the following bug report and extract structured bug data as JSON.\n\nQA Tester's Report:\n{text}"},
+            {
+                "role": "user",
+                "content": f"Analyze the following bug report and extract structured bug data as JSON.\n\nQA Tester's Report:\n{text}",
+            },
         ]
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             start_ts = _time.time()
             response = await asyncio.wait_for(
@@ -711,7 +800,9 @@ class GeminiClient:
                         messages=messages,
                         response_format={"type": "json_object"},
                         temperature=0.2,
-                        max_tokens=2000,
+                        # 1500 tokens = increased ceiling for Phase 1 JSON output to completely
+                        # prevent any truncation risk, giving a huge safety margin.
+                        max_tokens=1500,
                         timeout=20.0,
                     ),
                 ),
@@ -719,7 +810,16 @@ class GeminiClient:
             )
 
             response_text = response.choices[0].message.content
-            _log_llm_call("phase1", start_ts, response_chars=len(response_text or ""), extra={"rag_examples": rag_meta["count"], "rag_outcome": rag_meta["outcome"], "rag_source": rag_meta["source"]})
+            _log_llm_call(
+                "phase1",
+                start_ts,
+                response_chars=len(response_text or ""),
+                extra={
+                    "rag_examples": rag_meta["count"],
+                    "rag_outcome": rag_meta["outcome"],
+                    "rag_source": rag_meta["source"],
+                },
+            )
             logger.info(f"Phase 1 LLM response: {response_text[:300]}")
 
             cleaned = self._clean_json_response(response_text)
@@ -758,11 +858,16 @@ class GeminiClient:
         """
         content_parts = []
 
-        # Build prompt from template (Theme 3.1)
+        # Build prompt from template.
+        # Inject Phase 1 field values so the output template carries them forward
+        # rather than defaulting to hardcoded "STAGE" / "Functional/Logical" / "Medium".
         initial_json = initial_report.model_dump_json(indent=2)
         context_prompt = PHASE2_PROMPT_TEMPLATE.format(
             initial_json=initial_json,
             original_brief=text,
+            initial_environment=initial_report.environment.value,
+            initial_bug_type=initial_report.bug_type.value,
+            initial_priority=initial_report.priority.value,
         )
         content_parts.append({"type": "text", "text": context_prompt})
 
@@ -774,10 +879,12 @@ class GeminiClient:
 
             if mime_type.startswith("image/"):
                 b64_data = base64.b64encode(data).decode("utf-8")
-                content_parts.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime_type};base64,{b64_data}"},
-                })
+                content_parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime_type};base64,{b64_data}"},
+                    }
+                )
                 frame_count += 1
                 logger.info(f"Added image to Phase 2: {mime_type}, {len(data)} bytes")
 
@@ -785,39 +892,50 @@ class GeminiClient:
                 frames = self._extract_video_frames(data, mime_type)
                 for frame in frames:
                     b64_frame = base64.b64encode(frame["data"]).decode("utf-8")
-                    content_parts.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{frame['mime_type']};base64,{b64_frame}"},
-                    })
+                    content_parts.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{frame['mime_type']};base64,{b64_frame}"
+                            },
+                        }
+                    )
                 frame_count += len(frames)
                 if frames:
-                    content_parts.append({
-                        "type": "text",
-                        "text": (
-                            f"[Above are {len(frames)} frames extracted at 1fps from a "
-                            f"{len(data)/1024/1024:.1f}MB video. Analyze them sequentially "
-                            f"to trace the bug reproduction flow step by step.]"
-                        ),
-                    })
+                    content_parts.append(
+                        {
+                            "type": "text",
+                            "text": (
+                                f"[Above are {len(frames)} frames extracted at 1fps from a "
+                                f"{len(data) / 1024 / 1024:.1f}MB video. Analyze them sequentially "
+                                f"to trace the bug reproduction flow step by step.]"
+                            ),
+                        }
+                    )
                 logger.info(f"Added {len(frames)} video frames to Phase 2")
 
             elif mime_type.startswith("audio/"):
                 b64_data = base64.b64encode(data).decode("utf-8")
-                content_parts.append({
-                    "type": "input_audio",
-                    "input_audio": {
-                        "data": b64_data,
-                        "format": mime_type.split("/")[-1],
-                    },
-                })
+                content_parts.append(
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": b64_data,
+                            "format": mime_type.split("/")[-1],
+                        },
+                    }
+                )
                 logger.info(f"Added audio to Phase 2: {mime_type}, {len(data)} bytes")
             else:
                 logger.warning(f"Unsupported media type: {mime_type}")
 
-        logger.info(f"Phase 2: Sending {frame_count} visual frames to LLM for detailed analysis")
+        logger.info(
+            f"Phase 2: Sending {frame_count} visual frames to LLM for detailed analysis"
+        )
 
-
-        fewshot_block, rag_meta = self._build_fewshot_block(query=text, project_id=project_id, phase="phase1")
+        fewshot_block, rag_meta = self._build_fewshot_block(
+            query=text, project_id=project_id, phase="phase1"
+        )
         system_prompt = SYSTEM_PROMPT_BASE + fewshot_block
         messages = [
             {"role": "system", "content": system_prompt},
@@ -828,7 +946,7 @@ class GeminiClient:
 
         # ── Single attempt, no retries (Theme 3.2) ──
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             start_ts = _time.time()
             response = await asyncio.wait_for(
                 loop.run_in_executor(
@@ -838,22 +956,38 @@ class GeminiClient:
                         messages=messages,
                         response_format={"type": "json_object"},
                         temperature=0.2,
-                        max_tokens=6000,       # Theme 3.2: 3× safety multiplier
-                        timeout=45.0,          # Theme 3.2: client timeout
+                        # 2000 tokens = safe ceiling for Phase 2 JSON output.
+                        # Phase 2 enriches from video frames — steps can be longer,
+                        # actual_behavior may include exact error text from frames.
+                        # 2000 gives a 4-5× safety margin over observed max (~400 tokens).
+                        max_tokens=2000,
+                        timeout=45.0,
                     ),
                 ),
-                timeout=50.0  # Theme 3.2.1: asyncio.wait_for timeout
+                timeout=50.0,
             )
             _log_llm_call(
-                "phase2", start_ts,
+                "phase2",
+                start_ts,
                 response_chars=len(response.choices[0].message.content or ""),
-                extra={"frames": frame_count, "rag_examples": rag_meta["count"], "rag_outcome": rag_meta["outcome"], "rag_source": rag_meta["source"]},
+                extra={
+                    "frames": frame_count,
+                    "rag_examples": rag_meta["count"],
+                    "rag_outcome": rag_meta["outcome"],
+                    "rag_source": rag_meta["source"],
+                },
             )
         except asyncio.TimeoutError:
             _log_llm_call(
-                "phase2", start_ts,
+                "phase2",
+                start_ts,
                 exc=TimeoutError("phase2 wait_for 50s"),
-                extra={"frames": frame_count, "rag_examples": rag_meta["count"], "rag_outcome": rag_meta["outcome"], "rag_source": rag_meta["source"]},
+                extra={
+                    "frames": frame_count,
+                    "rag_examples": rag_meta["count"],
+                    "rag_outcome": rag_meta["outcome"],
+                    "rag_source": rag_meta["source"],
+                },
             )
             # Fall-back path 2: timeout → return Phase 1 result
             logger.error(
@@ -887,17 +1021,26 @@ class GeminiClient:
             except NameError:
                 raw = ""
             if raw and "is_valid" in raw.lower() and "false" in raw.lower():
-                logger.info("Detected rejection intent in malformed JSON — extracting reason")
+                logger.info(
+                    "Detected rejection intent in malformed JSON — extracting reason"
+                )
                 import re as _re
+
                 reason_match = _re.search(r'"reason"\s*:\s*"([^"]+)"', raw)
-                reason = reason_match.group(1) if reason_match else "The attached image does not appear to be an app screenshot or bug recording."
+                reason = (
+                    reason_match.group(1)
+                    if reason_match
+                    else "The attached image does not appear to be an app screenshot or bug recording."
+                )
                 return {"is_valid": False, "reason": reason}
             # Fall back to Phase 1 on unparseable JSON
             return initial_report
 
         # Check if media was rejected by inline screening
         if "is_valid" in result_json and not result_json["is_valid"]:
-            return result_json  # Return dictionary to be processed by caller as rejection
+            return (
+                result_json  # Return dictionary to be processed by caller as rejection
+            )
 
         enriched_report = ExtractedBugReport(**result_json)
 
@@ -969,7 +1112,8 @@ class GeminiClient:
             preview = cleaned[-200:]
             logger.error(
                 "PHASE2_TRUNCATED detections=%s preview=%r",
-                detections, preview,
+                detections,
+                preview,
             )
             raise Phase2TruncatedError(detections, preview=preview)
 
@@ -986,8 +1130,8 @@ class GeminiClient:
         frames = []
 
         try:
-            import tempfile
             import os
+            import tempfile
 
             # Write video to temp file
             ext = {
@@ -1010,7 +1154,9 @@ class GeminiClient:
                 fps = cap.get(cv2.CAP_PROP_FPS)
 
                 if total_frames <= 0 or fps <= 0:
-                    logger.warning("Video has 0 frames or unknown FPS, skipping extraction")
+                    logger.warning(
+                        "Video has 0 frames or unknown FPS, skipping extraction"
+                    )
                     return frames
 
                 # Extract max 20 frames (as a robust compromise to prevent missing crucial moments while saving time)
@@ -1025,8 +1171,7 @@ class GeminiClient:
 
                 # Extract evenly spaced frames
                 frame_indices = [
-                    int(i * total_frames / num_frames)
-                    for i in range(num_frames)
+                    int(i * total_frames / num_frames) for i in range(num_frames)
                 ]
 
                 for idx in frame_indices:
@@ -1045,10 +1190,12 @@ class GeminiClient:
                         _, buffer = cv2.imencode(
                             ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 50]
                         )
-                        frames.append({
-                            "data": buffer.tobytes(),
-                            "mime_type": "image/jpeg",
-                        })
+                        frames.append(
+                            {
+                                "data": buffer.tobytes(),
+                                "mime_type": "image/jpeg",
+                            }
+                        )
 
                 cap.release()
                 logger.info(f"Extracted {len(frames)} frames from video using OpenCV")
@@ -1065,91 +1212,6 @@ class GeminiClient:
             logger.error(f"Video frame extraction failed: {e}")
 
         return frames
-
-    async def screen_media_content(self, media_items: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Pre-screen media to determine if it is a valid app/product screenshot or video.
-        Returns {"is_valid": bool, "reason": str}.
-        Rejects selfies, people photos, non-product images, memes, etc.
-        """
-        SCREENING_PROMPT = (
-            "You are a content screening gate for a QA Bug Reporting bot at IndiaMART.\n"
-            "Your ONLY job is to determine if the attached image(s) are VALID for a bug report.\n\n"
-            "VALID content (return is_valid=true):\n"
-            "- Mobile app screenshots (any app screen, popup, dialog, error)\n"
-            "- Web application screenshots (browser pages, dashboards, forms)\n"
-            "- Screen recordings / video frames showing app UI\n"
-            "- Console logs, error messages, terminal output\n"
-            "- Developer tools / network tabs / API responses\n\n"
-            "INVALID content (return is_valid=false):\n"
-            "- Photos of people, selfies, group photos\n"
-            "- Photos of animals, nature, landscapes\n"
-            "- Memes, jokes, stickers, GIFs\n"
-            "- Food photos, random objects\n"
-            "- Documents/PDFs that are NOT related to software testing\n"
-            "- Blank or completely black/white images\n\n"
-            "Respond with ONLY valid JSON:\n"
-            '{"is_valid": true/false, "reason": "brief explanation"}'
-        )
-
-        content_parts = [{"type": "text", "text": "Screen this media. Is it a valid app/product screenshot for a QA bug report?"}]
-
-        # Add first image or first frame of video for screening
-        for item in media_items[:1]:  # Only screen the first item for speed
-            mime_type = item["mime_type"]
-            data = item["data"]
-
-            if mime_type.startswith("image/"):
-                b64_data = base64.b64encode(data).decode("utf-8")
-                content_parts.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime_type};base64,{b64_data}"},
-                })
-            elif mime_type.startswith("video/"):
-                frames = self._extract_video_frames(data, mime_type)
-                if frames:
-                    # Just screen the first frame
-                    b64_frame = base64.b64encode(frames[0]["data"]).decode("utf-8")
-                    content_parts.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{frames[0]['mime_type']};base64,{b64_frame}"},
-                    })
-                else:
-                    return {"is_valid": True, "reason": "Could not extract video frames for screening, allowing through."}
-            else:
-                # Audio or unsupported — allow through
-                return {"is_valid": True, "reason": "Non-visual media, skipping screen."}
-
-        messages = [
-            {"role": "system", "content": SCREENING_PROMPT},
-            {"role": "user", "content": content_parts},
-        ]
-
-        try:
-            import asyncio
-            loop = asyncio.get_event_loop()
-            response = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: self.client.chat.completions.create(
-                        model=self.model,
-                        messages=messages,
-                        response_format={"type": "json_object"},
-                        temperature=0.1,
-                        max_tokens=200,
-                        timeout=15.0,
-                    ),
-                ),
-                timeout=20.0,
-            )
-            response_text = response.choices[0].message.content
-            logger.info(f"Content screening result: {response_text}")
-            cleaned = self._clean_json_response(response_text)
-            result = json.loads(cleaned)
-            return {"is_valid": result.get("is_valid", True), "reason": result.get("reason", "")}
-        except Exception as e:
-            logger.error(f"Content screening failed: {e}. Allowing through.")
-            return {"is_valid": True, "reason": f"Screening failed ({e}), allowing through."}
 
     async def check_health(self) -> bool:
         """Check if LLM API is accessible. Kept for backwards compatibility."""
@@ -1171,9 +1233,10 @@ class GeminiClient:
         Never raises.
         """
         import asyncio
+
         start_ts = _time.time()
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             response = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
@@ -1194,7 +1257,9 @@ class GeminiClient:
                 "detail": f"chars={chars}",
             }
         except asyncio.TimeoutError as e:
-            outcome = _log_llm_call("smoke", start_ts, exc=TimeoutError(f"smoke {timeout_s}s"))
+            outcome = _log_llm_call(
+                "smoke", start_ts, exc=TimeoutError(f"smoke {timeout_s}s")
+            )
             return {
                 "outcome": outcome,
                 "duration_ms": int((_time.time() - start_ts) * 1000),
@@ -1253,7 +1318,7 @@ class GeminiClient:
 
         start_ts = _time.time()
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             response = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
@@ -1269,7 +1334,8 @@ class GeminiClient:
             )
             answer = (response.choices[0].message.content or "").strip()
             _log_llm_call(
-                "bucket_picker", start_ts,
+                "bucket_picker",
+                start_ts,
                 response_chars=len(answer),
                 extra={"answer": repr(answer[:60])},
             )
@@ -1277,8 +1343,9 @@ class GeminiClient:
             _log_llm_call("bucket_picker", start_ts, exc=e)
             return None
 
-        # Strip common trailing punctuation/quotes the LLM may add
-        answer = answer.strip().strip('"').strip("'").rstrip(".,;")
+        # Strip trailing punctuation first, THEN enclosing quotes.
+        # Order matters: '"Desktop Login".' → rstrip('.') → '"Desktop Login"' → strip('"') → 'Desktop Login'
+        answer = answer.strip().rstrip(".,;").strip('"').strip("'")
         if not answer or answer.upper() == "NONE":
             return None
 
@@ -1288,11 +1355,5 @@ class GeminiClient:
             if c.lower() == answer.lower():
                 return c
 
-        # Best-effort substring match (e.g. answer "Photo Search IM" → "Photo Search")
-        for c in candidates:
-            if c.lower() in answer.lower() or answer.lower() in c.lower():
-                if len(c) >= 4 and len(answer) >= 4:
-                    return c
-
-        # No confident match
+        # No confident match — don't guess
         return None
