@@ -257,7 +257,7 @@ You MUST respond with valid JSON matching the schema below. No markdown, no expl
 
 ## JSON SCHEMA (all fields required)
 {
-  "title": "Concise bug title (50-120 chars). Format: [Feature] does not [work] on [Screen].",
+  "title": "Concise bug title (50-120 chars). Describe the issue clearly without adding bracketed prefixes like [Feature] or [Project].",
   "actual_behavior": "2-3 sentences: (1) what the user was doing, (2) the unexpected outcome that occurred, (3) any visible error text or UI state. Do NOT simply repeat or lowercase the title.",
   "expected_behavior": "The correct outcome from the user's perspective. Do NOT negate actual_behavior by just adding 'should'. For crashes: describe graceful recovery. For wrong values: state the correct value. For broken CTAs: describe what the tap should trigger.",
   "steps_to_reproduce": ["Step 1", "Step 2", "..."],
