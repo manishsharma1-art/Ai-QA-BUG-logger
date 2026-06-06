@@ -74,6 +74,7 @@ async def run_scenario(name: str, payload: dict, expected_project: int, mock_pha
     
     async with _make_async_client() as client:
         with patch("main.get_user_by_chat_id", new_callable=AsyncMock) as mock_user, \
+             patch("main._is_rate_limited", return_value=False), \
              patch.object(main.op_client, "create_work_package", new_callable=AsyncMock) as mock_create, \
              patch.object(main.gemini_client, "analyze_text_brief", new_callable=AsyncMock) as mock_analyze, \
              patch.object(main.gemini_client, "enrich_with_media", new_callable=AsyncMock) as mock_enrich, \
@@ -109,6 +110,10 @@ async def run_scenario(name: str, payload: dict, expected_project: int, mock_pha
                 assert "Please provide a brief description" in text, f"Unexpected response: {text}"
                 assert not mock_create.called, "create_work_package was called but rejection was expected"
                 return None
+            else:
+                text = response.json().get("text", "")
+                if "You are not registered" in text or "⚠️" in text or "❌" in text:
+                    print(f"DEBUG: Webhook rejected: {text}")
 
             # Await all background tasks launched by main
             import main

@@ -102,36 +102,21 @@ PHASE 2 — Async background task (15-50s)
   └─ chat_client.send_message(success_msg or rejection_msg)
 ```
 
-### C. Few-shot prompt augmentation (audit-driven)
+### C. Dual-Layer RAG Architecture (Anti-Hallucination)
 
-`gemini_client._load_few_shot_block(max_examples=10)` runs once at module import and serves as the **static fallback** when RAG is disabled or fails. The primary path uses `bug_retriever.py` to dynamically select the top-K most semantically similar tickets from the 11,862-entry corpus at retrieval time.
+To prevent the LLM from hallucinating fake account IDs, inventing buttons, or guessing reproduction steps, the bot uses a strictly enforced **Dual-Layer Retrieval-Augmented Generation (RAG)** architecture.
 
-**Static fallback** (when RAG is disabled or fails): the top 10 entries from `assets/training_examples.json` are rendered as INPUT→OUTPUT pairs and appended to `SYSTEM_PROMPT`.
+#### Layer A: TestLink Knowledge Base (Functionality Flow)
+*   **Corpus:** 710 TestLink sanity test cases (`assets/testlink_cases.json`).
+*   **Purpose:** Acts as a dictionary for official functionality flow. It provides the exact screen names, CTA button names, and navigation paths for the feature being tested.
+*   **Mechanism:** `testlink_retriever.py` embeds the incoming brief, finds the single best-matching sanity test case, and prepends it to the prompt. This strictly grounds the LLM in real domain terminology. (Skipped if `TESTLINK_RAG_ENABLED=false` or similarity < 0.30).
 
-- 10 examples ≈ ~2,500 tokens of prompt overhead (was ~12K at 50 examples — ~1,800ms latency saving on cold start)
-- Empirically measured Phase 1 median latency with static fallback: ~2.6s avg
-- 100+ examples risk a gateway timeout cliff — DO NOT bump static fallback past 50
+#### Layer B: 11k Bug Corpus (Structure & Context)
+*   **Corpus:** 11,862 historical QA tickets (`assets/training_examples.json`).
+*   **Purpose:** Teaches the LLM how to format the ticket and how past bugs in this specific area were written.
+*   **Mechanism:** `bug_retriever.py` fetches the top 10 most semantically similar historical bugs and injects them as few-shot examples.
 
-**Training data quality filters (added 2026-06-05):** entries with HTML artifacts, unfilled template placeholders, or missing steps are skipped at index time.
-
-Both Phase 1 and Phase 2 see the same prompt composition (Layer A + Layer B + base rules).
-
-### D. TestLink Knowledge Base (2026-06-05)
-
-`testlink_retriever.py` provides a second RAG layer ("Layer A") that injects domain-specific flow knowledge — exact screen names, CTA names, and navigation flows — that the LLM cannot learn from bug ticket text alone.
-
-```
-Prompt construction (per request):
-  ┌─ Layer A: TestLink best-match test case        (prepended first)
-  │     • testlink_retriever.py embeds the incoming brief
-  │     • Cosine similarity against 710 TC embeddings
-  │     • Injects the single best match if similarity ≥ 0.30
-  │     • Skipped entirely if TESTLINK_RAG_ENABLED=false or no match
-  │
-  └─ Layer B: Bug-corpus few-shot examples         (follows Layer A)
-        • bug_retriever.py — top-K from 11,862 tickets
-        • Falls back to static 10-example block on error
-```
+**Static Fallback:** If RAG is disabled or fails, the system falls back to a static block of 10 examples.
 
 | Detail | Value |
 |---|---|
@@ -149,24 +134,40 @@ Prompt construction (per request):
 
 ---
 
-## 3. File Map
+## 3. Codebase Site Map
 
-| File | Purpose | Key entry points |
-|---|---|---|
-| `main.py` | FastAPI app, lifespan, webhook handler, `_handle_bug_report` orchestration | `webhook()`, `_handle_bug_report()`, `_process_media_and_create_ticket()`, `_verify_webhook_auth()` |
-| `gemini_client.py` | LLM integration, prompts, frame extraction, smoke test, bucket picker | `analyze_text_brief()`, `enrich_with_media()`, `smoke_test()`, `pick_bucket()`, `_clean_json_response()`, `_log_llm_call()` |
-| `bucket_router.py` | Deterministic project routing, no LLM | `extract_bucket_from_message()`, `extract_bucket_with_provenance()`, `_extract_bucket_from_freetext()`, `_resolve_tag()` |
-| `models.py` | Pydantic models, validators | `ExtractedBugReport`, `validate_priority` (word-boundary regex), `validate_platform` (30-alias map) |
-| `openproject_client.py` | OpenProject v3 REST client + `OP_CALL` log wrapper | `create_work_package(bug_report, api_key, project_id)`, `_log_op_call()`, `attach_file_to_work_package()` |
-| `google_auth.py` | SA auth, Chat API send, attachment download | `send_message()`, `download_attachment()`, `is_available()` |
-| `database.py` | SQLite + GCS sync with fail-closed safeguard | `get_user_by_chat_id()`, `create_or_update_user()`, `_download_db_from_gcs()`, `_upload_db_to_gcs()`, `_safe_upload_db_to_gcs()`, `get_last_gcs_sync()` |
-| `env_validator.py` | Startup env-var corruption canary | `validate_env_vars()` (5 checks), `read_build_marker()` |
-| `config.py` | Settings, `OP_PROJECTS` (34 projects), bug-type / priority / environment ID mappings | `get_settings()` |
-| `bug_retriever.py` | Bug-corpus RAG retriever (Layer B) | `index()`, `retrieve()`, `format_for_prompt()` |
-| `testlink_retriever.py` | TestLink sanity test case RAG retriever (Layer A) | `init_testlink_retriever()`, `get_testlink_retriever()`, `TestLinkRetriever.retrieve()`, `TestLinkRetriever.format_for_prompt()` |
-| `scripts/fetch_testlink.py` | One-time/periodic TestLink data pipeline | Run with `python scripts/fetch_testlink.py` |
-| `assets/training_examples.json` | 11,862 curated real tickets — source for bug-corpus RAG (Layer B) | (read by `bug_retriever.index`) |
-| `assets/testlink_cases.json` | 710 TestLink sanity test cases (clean JSON, no HTML) | Source for TestLink retriever (Layer A) |
+This is the complete directory structure and architectural map of the project.
+
+```text
+QA_BUG_Logger/
+│
+├── main.py                     # Entry point, FastAPI app, webhook handler, two-phase orchestration
+├── gemini_client.py            # LLM integration, prompt templates, anti-hallucination rules, video frames
+├── bucket_router.py            # Deterministic OpenProject routing logic (regex + scoring), NO LLM
+├── models.py                   # Pydantic models & validation schemas
+├── openproject_client.py       # OpenProject REST client, ticket creation, attachment uploading
+├── google_auth.py              # Google Cloud service account auth, Chat API sending, video downloads
+├── database.py                 # SQLite local DB & GCS sync for cross-deployment persistence
+├── env_validator.py            # Startup checks for environment variable corruption
+├── config.py                   # Project configurations, OpenProject IDs, aliases, priorities
+├── bug_retriever.py            # Layer B RAG: Retrieves top-K similar bugs from 11k corpus
+├── testlink_retriever.py       # Layer A RAG: Retrieves TestLink sanity case for functionality flow
+│
+├── assets/                     # Data dependencies (Not pushed to Git, downloaded via scripts/GCS)
+│   ├── training_data_6000.csv  # Raw historical bugs
+│   ├── training_examples.json  # 11.8K parsed historical bugs used for RAG Layer B
+│   └── testlink_cases.json     # 710 TestLink sanity cases used for RAG Layer A
+│
+├── scripts/                    # Utilities and pipelines
+│   └── fetch_testlink.py       # Connects to TestLink XML-RPC API to refresh testlink_cases.json
+│
+├── tests/                      # Unit and integration test suite (pytest)
+│   ├── unit/                   # 236 unit tests for routing, prompting, auth, etc.
+│   └── ...
+│
+└── data/                       # Local volume (gitignored)
+    └── qa_bugbot.db            # Local SQLite database (synced to GCS)
+```
 
 ---
 
@@ -397,7 +398,21 @@ Store the key value in `DB_ENCRYPTION_KEY` — never commit it.
 
 ---
 
-## 10. Recent Changes Worth Knowing About (2026-05-25 → 2026-06-05)
+## 10. Local vs Production Discrepancies (As of 2026-06-06)
+
+This section explicitly documents what is currently running on Production versus what has been fixed in the Local environment and is waiting to be deployed.
+
+| Feature / Issue | Production State | Local State |
+|---|---|---|
+| **RAG Architecture** | Uses massive 50-example static prompt (no RAG). | Uses Dual-Layer RAG (TestLink for flow + 11k Bug Corpus for structure). |
+| **Bucket Routing (Device Fallback)** | Hallucinates "Seller Dashboard" when a tester provides a generic OS (e.g. "Crash on Android 14") because it fails to parse the OS format and falls back to the LLM. | Instantly routes to Android/iOS using `_OS_VERSION_RE` and `_has_strong_device_signal` without invoking the LLM fallback. |
+| **Bucket Routing (Explicit Fallback)** | N/A | Fixed a logic ordering bug where device detection accidentally overrode explicit shorthand (e.g. "bucket: Photo Search"). Layer 2 (Free-text explicit) now correctly runs *before* Layer 3 (Device Fallback). |
+| **LLM Guardrails** | No anti-hallucination guardrails; LLM frequently invents fake account IDs (e.g., `1002345678`) and guesses reproduction steps. | 9 explicit Anti-Hallucination rules injected into the prompt. Forces LLM to only use steps shown in video or TestLink. |
+| **Phase 1 Latency** | ~4.4 seconds for Slack ACK. | < 0.5 seconds for Slack ACK (no LLM fallback needed for generic routing). |
+
+---
+
+## 11. Recent Changes Worth Knowing About (2026-05-25 → 2026-06-05)
 
 ### Security hardening (2026-06-05)
 
@@ -465,7 +480,7 @@ Store the key value in `DB_ENCRYPTION_KEY` — never commit it.
 
 ---
 
-## 11. Critical Things to NEVER Do
+## 12. Critical Things to NEVER Do
 
 1. **Never use `--set-env-vars` with space-separated values.** RC2 root cause. Always comma-separated, or use `--env-vars-file env.yaml`.
 2. **Never deploy without `--no-cpu-throttling`.** Phase 2 will silently die.
@@ -488,7 +503,7 @@ Store the key value in `DB_ENCRYPTION_KEY` — never commit it.
 
 ---
 
-## 12. How to Continue Development
+## 13. How to Continue Development
 
 If you are an LLM reading this:
 

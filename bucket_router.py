@@ -299,11 +299,15 @@ def extract_bucket_with_provenance(text: str) -> Tuple[Optional[int], str, str]:
                 f"Bucket routing: [{tag}] — no match found, trying free-text"
             )
 
-    # Layer 2 — Strong device signal (OS version or device model).
-    # Runs BEFORE free-text alias matching intentionally:
-    # when a tester writes "Seller dashboard crash. Samsung S23, Android 14"
-    # they describe the SCREEN they were on, not the project.
-    # Device/OS info is an explicit platform declaration and must win.
+    # Layer 2 — Free-text project alias scoring.
+    # Runs before device detection so explicit project mentions win.
+    project_id = _extract_bucket_from_freetext(text)
+    if project_id:
+        logger.info(f"Bucket routing: free-text match \u2192 project {project_id}")
+        return project_id, text, "freetext"
+
+    # Layer 3 — Strong device signal (OS version or device model).
+    # Used as a fallback when no explicit project is mentioned in the text.
     if _has_strong_device_signal(text):
         project_id, device_matched = _detect_device_platform_with_provenance(text)
         if device_matched:
@@ -312,15 +316,6 @@ def extract_bucket_with_provenance(text: str) -> Tuple[Optional[int], str, str]:
                 project_id,
             )
             return project_id, text, "device"
-
-    # Layer 3 — Free-text project alias scoring.
-    # Only reached when no explicit device/OS info is present in the brief.
-    # Safely matches project names ("Desktop Search", "Seller BuyLeads", etc.)
-    # without being confused by screen names that share project names.
-    project_id = _extract_bucket_from_freetext(text)
-    if project_id:
-        logger.info(f"Bucket routing: free-text match \u2192 project {project_id}")
-        return project_id, text, "freetext"
 
     # Layer 4 — Device model detection (catches device names without OS version).
     project_id, device_matched = _detect_device_platform_with_provenance(text)
